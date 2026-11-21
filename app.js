@@ -656,7 +656,7 @@ function derive() {
     if (m) { t = Date.parse(m.lastSeen); online = !isNaN(t) && (S.now - t) < ONLINE_MS; }
     var verified = !S.sig || S.sig["machines/" + n] === "ok", heldKey = !!(typeof DEV !== "undefined" && DEV.macKeys && DEV.macKeys[n]), mine = m && (verified || heldKey) ? mapSessions(m.sessions, n, online, S.now, S.titles, !verified) : [];
     mstat[n] = { exists: !!m, online: online, lastSeen: t, version: m ? str(m.version) : "", mode: m ? str(m.mode) : "", pairing: m && m.pairing === "paired" ? "paired" : "none", total: m && isFinite(Number(m.total)) ? Number(m.total) : null,
-      pairLocked: !!m && m.pairLocked === true, devicePaired: false, verified: verified, sigState: (S.sig && S.sig["machines/" + n]) || "pending", usage: m && verified ? cleanUsage(m.usage) : null, caps: cleanCaps(m && m.caps), assistant: cleanAssistant(m && m.assistant), devices: verified ? cleanDevices(m && m.devices) : [], quotaWarn: verified ? cleanQuotaWarn(m && m.quotaWarn) : "", lastError: m ? str(m.lastError) : "", lastErrorAt: m ? Date.parse(m.lastErrorAt) : NaN, shown: mine.length };
+      pairLocked: !!m && m.pairLocked === true, devicePaired: false, verified: verified, sigState: (S.sig && S.sig["machines/" + n]) || "pending", usage: m && verified ? cleanUsage(m.usage) : null, caps: cleanCaps(m && m.caps), startReason: verified && m && m.startReason === "not enabled" ? "starting is off on the Mac" : "", assistant: cleanAssistant(m && m.assistant), devices: verified ? cleanDevices(m && m.devices) : [], quotaWarn: verified ? cleanQuotaWarn(m && m.quotaWarn) : "", lastError: m ? str(m.lastError) : "", lastErrorAt: m ? Date.parse(m.lastErrorAt) : NaN, shown: mine.length };
     if (!m) return;
     buildTree(m.tree, tree);
     mine.forEach(function (x) { sessions.push(x); });
@@ -1086,7 +1086,7 @@ function startGate(mstat) {
   var paired = seen.filter(function (n) { return mstat[n].youPaired !== false; });
   if (!paired.length) return { ok: false, target: "", reason: "pair this device first" };
   var ok = paired.filter(function (n) { return mstat[n].caps && mstat[n].caps.start === true; });
-  return ok.length ? { ok: true, target: ok[0], reason: "" } : { ok: false, target: "", reason: "needs Mac update" };
+  return ok.length ? { ok: true, target: ok[0], reason: "" } : { ok: false, target: "", reason: paired.map(function (n) { return mstat[n].startReason; }).filter(Boolean)[0] || "needs Mac update" };
 }
 /** Restore button for a done archive request: show = the button belongs on this row; ok = it can be pressed. */
 function restoreGate(r, mstat, listed) {
@@ -1155,7 +1155,7 @@ function retryGate(r, mstat, machines, listed) {
   }
   if (r.action === "start") {
     var m = mstat && mstat[str(r.target)];
-    gate = !m || !m.exists || !m.online ? { ok: false, reason: (str(r.target) || "computer") + " offline" } : m.verified === false ? { ok: false, reason: "unverified data" } : m.youPaired === false ? { ok: false, reason: "pair this device first" } : (m.caps && m.caps.start === true ? gate : { ok: false, reason: "needs Mac update" });
+    gate = !m || !m.exists || !m.online ? { ok: false, reason: (str(r.target) || "computer") + " offline" } : m.verified === false ? { ok: false, reason: "unverified data" } : m.youPaired === false ? { ok: false, reason: "pair this device first" } : (m.caps && m.caps.start === true ? gate : { ok: false, reason: m.startReason || "needs Mac update" });
   } else if (r.action === "restore") {
     var rg = restoreGate({ action: "archive", status: "done", sessionId: r.sessionId, machine: r.target || r.machine }, mstat, listed);
     gate = rg.ok ? gate : { ok: false, reason: rg.reason || "already restored" };
