@@ -3439,6 +3439,7 @@ function bubbleField(nodes, archN, level) {
   field.appendChild(h("div", { "class": "zoomctl rest", id: "mc-zoom", role: "group", "aria-label": "Zoom" },
     h("button", { type: "button", "aria-label": "Zoom out", onclick: function () { zoomBy(1 / 1.25); } }, icon("minus", 14)),
     h("button", { type: "button", "aria-label": "Zoom in", onclick: function () { zoomBy(1.25); } }, icon("plus", 14))));
+  if (S.group) field.appendChild(h("button", { "class": "homebtn", type: "button", "data-k": "home", "aria-label": "Home: back to all projects", onpointerdown: function (e) { e.stopPropagation(); }, onclick: function () { go(null, null); } }, icon("home", 18), h("span", { text: "Home" })));
   field.addEventListener("pointerdown", panDown);
   field.addEventListener("pointermove", panMove);
   field.addEventListener("pointerup", panUp);

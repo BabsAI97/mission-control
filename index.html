@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src https://mc-relay-iq56pv2d.xxreloadedx.workers.dev wss://mc-relay-iq56pv2d.xxreloadedx.workers.dev; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; base-uri 'none'; form-action 'none'; object-src 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src https://mission-control-relay.example.workers.dev wss://mission-control-relay.example.workers.dev; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; base-uri 'none'; form-action 'none'; object-src 'none'">
 <style id="fb">html{visibility:hidden}</style>
 <script src="guard.js"></script>
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
@@ -152,6 +152,7 @@ body.is-dragging #mc-archive{scale:1.1;outline:2px dashed var(--archStrong);outl
 
 /* Frosted zoom pill: only - and +, fixed bottom-right, 60% at 100% zoom */
 .zoomctl{position:fixed;right:16px;bottom:calc(var(--tb) + 12px);z-index:7;display:flex;height:36px;border-radius:18px;background:var(--frost);-webkit-backdrop-filter:blur(12px);backdrop-filter:blur(12px);box-shadow:var(--sh)}
+.homebtn{position:absolute;top:4px;left:16px;z-index:6;display:flex;align-items:center;gap:6px;min-height:44px;padding:0 16px;border:0;border-radius:22px;background:var(--frost);-webkit-backdrop-filter:blur(12px);backdrop-filter:blur(12px);box-shadow:var(--sh);color:var(--text);font:inherit;font-size:15px;font-weight:600;cursor:pointer}
 .zoomctl.rest{opacity:.6}
 .zoomctl.rest:hover,.zoomctl.rest:focus-within,.zoomctl.rest:active{opacity:1}
 .zoomctl button{position:relative;width:44px;height:36px;border:0;background:transparent;color:var(--text);display:flex;align-items:center;justify-content:center;padding:0;cursor:pointer}
