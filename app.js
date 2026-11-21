@@ -32,7 +32,7 @@ var S = {
   drafts: Object.create(null), reqErr: "", unknown: Object.create(null), pairUI: null, relayReadyAt: 0, reqSnapAt: 0, focusTimer: 0, lastRefreshAt: 0, focusActiveAt: 0, undo: null,
   ask: null, actOpen: false, savesOpen: false, saveSel: null, saveFocus: null, bannerOff: NaN, toastMsg: "",
   dragging: false, dirty: false, pinching: false, suppressUntil: 0, lastSig: "",
-  tab: "today", filter: "all", query: "", pins: Object.create(null), readAt: Object.create(null), readBase: NaN, queue: [], qTimer: 0, sendWatch: Object.create(null),
+  tab: "today", filter: "all", query: "", pins: Object.create(null), readAt: Object.create(null), readBase: NaN, queue: [], qTimer: 0, sendWatch: Object.create(null), reqWatch: Object.create(null),
   schedules: { Mac: undefined, PC: undefined }, saveOpen: null, actExp: null, swiping: false, openRow: null, hint: true, needsMap: Object.create(null), unreadMap: Object.create(null), todayData: null,
   assistInfo: null, assistAbout: "", assistDraft: "", assistLocal: [], assistSentAt: 0, assistAiAtSend: 0, assistLast: null, assistReq: null, cardState: Object.create(null), pairWatch: null,
   sig: Object.create(null), manifest: Object.create(null), docHash: Object.create(null), docAt: Object.create(null), mine: Object.create(null), ownSig: Object.create(null), hbNewest: Object.create(null), docMachine: Object.create(null), peekMin: Object.create(null), sigSeq: Object.create(null), ing: Object.create(null), rawReqs: [], reqVer: Object.create(null), pairDocs: { Mac: null, PC: null },
@@ -95,6 +95,8 @@ var BRIDGE_ERRORS = Object.assign(Object.create(null), {
   "no pairing code": "The Mac has no pairing code right now. Ask it for a new code.",
   "code expired": "That code expired. Ask the Mac for a new code.",
   "slow down": "Too many requests. Wait a minute, then try again.",
+  "tool error": "The Claude app on your Mac refused it. The reason is in the Mac\u2019s debug log.",
+  "no folder": "Your Mac has no folder set for that project.",
   "bad name": "That device name isn\u2019t allowed. Use letters and numbers.",
   "bad key": "This browser\u2019s key was refused. Try pairing again.",
   "too many devices": "The Mac already has 5 devices. Remove one first.",
@@ -159,7 +161,7 @@ function packLayout(items, fw) {
   return { W: W, H: H };
 }
 /* ---- bubble physics (pure geometry; all numbers share one unit, e.g. field px) ---- */
-var PILL_W = 206, PILL_H = 72, PUSH_GAP = 6, MERGE_RATIO = 0.5;
+var PILL_W = 206, PILL_H = 72, PUSH_GAP = 6, MERGE_RATIO = 0.9; // 0.9: dropping almost anywhere over a bubble merges (was 0.5, too fussy on a phone)
 /** Move circle c (x,y,r) inside 0..w x 0..h and out of the keep-out rect k (or null). */
 function physClamp(p, r, w, h, k) {
   var x = p.x, y = p.y;
@@ -355,12 +357,13 @@ function toast(msg, o) {
     el.classList.add("out"); setTimeout(function () { el.remove(); }, 300);
   }
   if (opt.undo) el.appendChild(h("button", { "class": "btn", type: "button", "aria-label": "Undo", onclick: function () { kill(true, false); opt.undo(); }, text: "Undo" }));
+  if (opt.action && !opt.undo) el.appendChild(h("button", { "class": "btn", type: "button", onclick: function () { kill(true, false); opt.action.fn(); }, text: opt.action.label }));
   el.appendChild(h("button", { "class": "btn tx", type: "button", "aria-label": "Dismiss message", onclick: function () { kill(false, false); }, text: "\u2715" }));
   el.addEventListener("touchstart", function (e) { y0 = e.touches[0].clientY; }, { passive: true });
   el.addEventListener("touchmove", function (e) { if (y0 !== null && e.touches[0].clientY - y0 > 24) { y0 = null; kill(false, false); } }, { passive: true });
   clear(host); host.appendChild(el);
   TOAST = { el: el, kill: kill, undo: !!opt.undo };
-  timer = setTimeout(function () { kill(false, false); }, opt.undo ? 5000 : 3000);
+  timer = setTimeout(function () { kill(false, false); }, opt.undo ? 5000 : opt.action ? 8000 : 3000);
 }
 function hideToast() { if (TOAST) TOAST.kill(true, false); }
 function newId() { return "r_" + Date.now() + "_" + Math.random().toString(36).slice(2, 8); }
@@ -386,7 +389,7 @@ async function connect() {
   });
   unsubs.push(S.db.collection("requests").orderBy("createdAt", "desc").limit(200).onSnapshot(function (snap) {
     ingestRequests(snap.docs.map(function (d) { return d.data() || {}; })); S.reqSnapAt = Date.now();
-    checkUnknown(); checkRefresh(); checkSendWatch(); checkPairWatch();
+    checkUnknown(); checkRefresh(); checkSendWatch(); checkReqWatch(); checkPairWatch();
     render();
   }, onDbError));
   S.db.connect();
@@ -1007,6 +1010,19 @@ function todayPick(sessions, now, flagsOf) {
   });
   done.sort(function (a, b) { return b.last - a.last; });
   return { needs: needs.slice(0, NEEDS_MAX), needsMore: Math.max(0, needs.length - NEEDS_MAX), running: running.slice(0, RUN_MAX), runningMore: Math.max(0, running.length - RUN_MAX), done: done.slice(0, DONE_MAX), doneMore: Math.max(0, done.length - DONE_MAX) };
+}
+var AWAY_MS = 2 * 3600000;
+/** Catch-me-up line after 2 h+ away: failures first, then what needs you, then what finished. "" when nothing happened. */
+function catchUpText(sessions, requests, since, flagsOf) {
+  if (!isFinite(since)) return "";
+  var err = (requests || []).filter(function (r) { var t = Date.parse(r.doneAt || r.createdAt); return r.status === "error" && t > since; }).length;
+  var needs = 0, fin = 0;
+  (sessions || []).forEach(function (s) { var f = flagsOf(s) || {}; if (s.status === "running") return; if (f.needs) needs++; else if (s.status !== "stale" && isFinite(s.last) && s.last > since) fin++; });
+  var parts = [];
+  if (err) parts.push(plural(err, "error", "errors"));
+  if (needs) parts.push(needs + " need" + (needs === 1 ? "s" : "") + " you");
+  if (fin) parts.push(fin + " finished");
+  return parts.length ? "Since " + hhmm(since) + ": " + parts.join(", ") : "";
 }
 /** Health warnings: a usage window at 70% or more, a computer that is offline, a recent bridge error. [] = one green line. */
 function healthWarnings(mstat, usage, now) {
@@ -1756,9 +1772,10 @@ async function createRequest(f, opts) {
   opts = Object.assign({}, opts, { sent: {} });
   var id = opts.id || newId(); // a retry keeps its id: the bridge's ledger stops one id from running twice
   var body = opts.body || requestBody(f, id, new Date().toISOString());
-  try { await writeRequest(body, opts); return id; }
+  try { await writeRequest(body, opts); watchReq(id, f); return id; }
   catch (e) {
     var isPair = f.action === "pair", msg = e && e.message;
+    if (!isPair && e && e.exists) watchReq(id, f);
     if (!isPair && e && e.exists) return id; // the relay already has this id: it arrived (success, pending the Mac)
     if (!isPair && e && e.lost) { // no ack: the write may have landed. Not a failure; check, then offer a retry with the same id
       S.unknown[id] = { id: id, f: f, body: body, signed: opts.sent.b || null, at: Date.now(), asked: false };
@@ -2195,16 +2212,17 @@ function schedDocs() { var d = {}; NAMES.forEach(function (n) { d[n] = sigOk("sc
 function schedUnverified() { return NAMES.some(function (n) { return S.schedules[n] && !sigOk("schedules/" + n); }); }
 function todayData(model) {
   var usage = bestUsage(model), sch = mergeSchedules(schedDocs());
-  return { pick: todayPick(uniq(model), S.now, flagsOf), usage: usage, warns: healthWarnings(model.mstat, usage, S.now), line: healthLine(usage), coming: comingUp(sch.items, S.now) };
+  return { pick: todayPick(uniq(model), S.now, flagsOf), catchUp: S.awaySince ? catchUpText(uniq(model), S.requests, S.awaySince, flagsOf) : "", usage: usage, warns: healthWarnings(model.mstat, usage, S.now), line: healthLine(usage), coming: comingUp(sch.items, S.now) };
 }
 function todayKey(model) {
   var d = S.todayData = todayData(model), p = d.pick;
   function row(s) { return [s.id, s.title, s.status, s.online, s.machine, !!S.pins[s.id], !!S.unreadMap[s.id], Math.floor(s.last / 60000), liveLine(s, S.peek[s.id], S.now), askText(s)]; }
-  return JSON.stringify([p.needs.map(row), p.running.map(row), p.done.map(row), p.needsMore, p.runningMore, p.doneMore, d.warns, d.line, d.coming.map(function (c) { return [c.id, c.next]; }), Math.floor(S.now / 60000)]);
+  return JSON.stringify([p.needs.map(row), p.running.map(row), p.done.map(row), p.needsMore, p.runningMore, p.doneMore, d.warns, d.line, d.coming.map(function (c) { return [c.id, c.next]; }), Math.floor(S.now / 60000), d.catchUp]);
 }
 function secHead(title, right) { return h("div", { "class": "sh" }, h("h2", { text: title }), right || null); }
 function todayNode(model) {
   var d = S.todayData || todayData(model), p = d.pick, f = document.createDocumentFragment();
+  if (d.catchUp) f.appendChild(h("div", { "class": "catchup", role: "status" }, h("span", { text: d.catchUp }), h("button", { "class": "btn tx", type: "button", "aria-label": "Dismiss summary", onclick: function () { S.awaySince = 0; render(true); }, text: "\u2715" })));
   f.appendChild(secHead("Needs you", p.needs.length ? h("span", { "class": "cap", text: (p.needs.length + p.needsMore) + " waiting" }) : null));
   if (p.needs.length) {
     var nc = h("div", { "class": "tcard need" });
@@ -2399,6 +2417,26 @@ function parkQueue() {
 function renderQueue() { /* the queued message is shown by the one toast */ }
 /** After a send request exists: say what happened to it (queued behind the current step, or delivered). */
 function watchSend(rid) { S.sendWatch[rid] = Date.now(); }
+/* Honest status: every request (except reply sends, list, peek and pairing, which have their own) ends in a toast saying Done or Failed + why, with Retry. */
+var REQ_LABEL = { start: "Start session", archive: "Archive", restore: "Restore", "agent-run": "Agent run", "research-now": "Research run", "agent-save": "Agent change", "agent-toggle": "Agent change", "agent-delete": "Agent delete", unpair: "Device removal" };
+var REQ_DONE = { start: "Session started on your Mac.", archive: "Archived.", restore: "Restored.", "agent-run": "Agent run started.", "research-now": "Research run started.", "agent-save": "Agent saved.", "agent-toggle": "Agent updated.", "agent-delete": "Agent deleted.", unpair: "Device removed." };
+function watchReq(id, f) { if (f && REQ_LABEL[f.action]) S.reqWatch[id] = { f: f, at: Date.now() }; }
+/** Where a request is now: "sending" (not picked up yet), "working", "done" or "error". */
+function reqState(id) {
+  var r = (S.requests || []).filter(function (x) { return x.id === id; })[0];
+  return !r ? { st: "sending" } : r.status === "done" ? { st: "done", r: r } : r.status === "error" ? { st: "error", r: r } : { st: r.status === "claimed" ? "working" : "sending", r: r };
+}
+function checkReqWatch() {
+  Object.keys(S.reqWatch).forEach(function (id) {
+    var w = S.reqWatch[id], x = reqState(id), a = w.f.action;
+    if (x.st === "done") { delete S.reqWatch[id]; toast(REQ_DONE[a] || "Done."); render(true); }
+    else if (x.st === "error") {
+      delete S.reqWatch[id];
+      toast(REQ_LABEL[a] + " failed: " + friendlyError(a, x.r.error || x.r.result || "unknown error"), { action: { label: "Retry", fn: function () { createRequest(w.f); } } });
+      render(true);
+    } else if (Date.now() - w.at > 300000) { delete S.reqWatch[id]; toast(REQ_LABEL[a] + ": no answer from your Mac in 5 min. Is it awake?"); }
+  });
+}
 function checkSendWatch() {
   Object.keys(S.sendWatch).forEach(function (rid) {
     var r = S.requests.filter(function (x) { return x.id === rid; })[0];
@@ -2520,7 +2558,13 @@ function actionCard(c, key, unverified) {
   el.appendChild(h("div", { "class": "cap", style: "color:var(--waitTx)", text: "Suggested action" }));
   el.appendChild(h("div", { style: "font-weight:600", text: label }));
   if (c.text) el.appendChild(h("div", { "class": "qt", text: "“" + c.text + "”" }));
-  if (st === "done") { el.appendChild(h("span", { "class": "tick" }, icon("check", 20), h("span", { text: "Requested" }))); return el; }
+  if (st === "done") { el.appendChild(h("span", { "class": "tick" }, icon("check", 20), h("span", { text: "Sent" }))); return el; }
+  if (st && st.slice(0, 4) === "req:") {
+    var x = reqState(st.slice(4));
+    if (x.st === "error") { el.appendChild(h("p", { "class": "note", style: "color:var(--bad)", text: "Failed: " + friendlyError(c.type, x.r.error || "unknown error") })); }
+    else { el.appendChild(h("span", { "class": "tick" }, x.st === "done" ? icon("check", 20) : null, h("span", { text: x.st === "done" ? "Done" : x.st === "working" ? "Your Mac is working on it\u2026" : "Sending to your Mac\u2026" }))); return el; }
+    st = ""; // failed: fall through so "Do it" shows again as the retry
+  }
   var gate = unverified ? { ok: false, reason: "unverified data" } : c.type === "start" ? startGate(S.model.mstat) : { ok: c.type !== "handoff", reason: "needs Mac update" };
   el.appendChild(h("div", { "class": "arow" },
     h("button", { "class": "btn primary", type: "button", disabled: gate.ok ? null : "", title: gate.ok ? null : gate.reason, "aria-label": "Do it: " + label, onclick: function () { doAction(c, key); }, text: "Do it" }),
@@ -2547,7 +2591,7 @@ function doAction(c, key) {
     var gate = startGate(S.model.mstat); if (!gate.ok) { toast("Can't start a session: " + gate.reason + "."); return; }
     var sel = projectPicker(), ta = h("textarea", { "class": "ta", "aria-label": "Prompt", maxlength: "4000", text: c.text });
     S.ask = { title: "Start this session?", okLabel: "Start session", body: "On " + gate.target + ". The assistant suggested this prompt; you can edit it. Nothing starts until you confirm.", node: h("div", { "class": "startbox" }, ta, h("label", { "class": "cap", text: "Project" }), sel),
-      ok: function () { var f = assistStartFields(ta.value, { target: gate.target, project: sel.value }); if (!f.prompt.trim()) return; createRequest(f).then(function (id) { if (id) { setCard(key, "done"); toast("Start requested. See Activity."); render(true); } }); } };
+      ok: function () { var f = assistStartFields(ta.value, { target: gate.target, project: sel.value }); if (!f.prompt.trim()) return; createRequest(f).then(function (id) { if (id) { setCard(key, "req:" + id); toast("Sending to your Mac\u2026"); render(true); } }); } };
     renderDialog();
   }
 }
@@ -2559,7 +2603,7 @@ function projectPicker() {
 function openAssistSetup(target) {
   if (!target) { toast("Can't set up the assistant right now."); return; }
   S.ask = { title: "Set up Assistant?", okLabel: "Set up", body: "Starts one helper session called “MC Assistant” on " + target + ". It can only read; it suggests actions and you confirm each one.",
-    ok: function () { createRequest(assistSetupFields(target)).then(function (id) { if (id) toast("Setup requested. See Activity."); }); } };
+    ok: function () { createRequest(assistSetupFields(target)).then(function (id) { if (id) toast("Sending to your Mac\u2026"); }); } };
   renderDialog();
 }
 
@@ -2901,7 +2945,7 @@ function ingestRequests(docs) {
     p.then(function (verdict) {
       S.reqVer[k] = verdict;
       if (verdict === "ok" && r.action === "peek" && r.status === "done" && r.sessionId) { var at = Date.parse(r.createdAt); if (isFinite(at)) S.peekMin[r.sessionId] = Math.max(S.peekMin[r.sessionId] || 0, at); recheckPeeks(); }
-      normalizeRequests(); checkRefresh(); checkSendWatch(); checkPairWatch(); render();
+      normalizeRequests(); checkRefresh(); checkSendWatch(); checkReqWatch(); checkPairWatch(); render();
     });
   });
 }
@@ -3291,7 +3335,7 @@ function openStart(kind, save, skill) {
   S.ask = { title: kind === "research" ? "Research this save?" : kind === "skill-install" ? "Install this skill?" : "Start a session with this save?", okLabel: "Start session", body: "On " + gate.target + ". Nothing starts until you confirm.", node: node,
     ok: function () {
       var f = startFields(kind, save, { target: gate.target, skill: skill, prompt: ta ? ta.value : "", project: sel.value });
-      createRequest(f).then(function (id) { if (id) toast("Start requested. See Activity."); });
+      createRequest(f).then(function (id) { if (id) toast("Sending to your Mac\u2026"); });
     } };
   renderDialog();
 }
@@ -3352,7 +3396,7 @@ function openRetry(r, f) {
   var full = f.action === "start" ? str(f.prompt) : f.text ? str(f.text) : "";
   if (full) node.appendChild(h("div", { "class": "pv", style: "max-height:240px", tabindex: "0", role: "region", "aria-label": "Full message", text: full }));
   S.ask = { title: "Retry this request?", okLabel: "Retry", body: body, node: node,
-    ok: function () { createRequest(f).then(function (id) { if (id) toast("Requested again. See Activity."); }); } };
+    ok: function () { createRequest(f).then(function (id) { if (id) toast("Sending again\u2026"); }); } };
   renderDialog();
 }
 function openRestore(r, target, title) {
@@ -3607,6 +3651,7 @@ function peekTick() {
   S.peekReq[id] = { id: rid, at: now };
   writeRequest(buildPeekRequest(id, S.machines, rid, new Date(now).toISOString())).catch(function () { delete S.peekReq[id]; }); // quiet: the 15 s fallback explains a missing log
 }
+var QUICK_REPLIES = ["Yes, go ahead", "No, stop", "Do what you recommend"];
 function askSend(s, text) {
   var t = str(text).trim(), run = s.status === "running";
   if (!t || S.busy["send:" + s.id]) return;
@@ -3668,7 +3713,10 @@ function renderFocus() {
   inp.addEventListener("input", function () { S.drafts[id] = inp.value; });
   inp.addEventListener("keydown", function (e) { if (e.key === "Enter") { e.preventDefault(); if (!e.repeat) askSend(s, inp.value); } });
   var sendBtn = h("button", { "class": "send", type: "button", "data-k": "fsend", "aria-label": "Review and send", disabled: !s.online || busy || unp ? "" : null, onclick: function () { askSend(s, inp.value); } }, icon("send", 18));
-  var comp = h("div", { "class": "fcomp" }, h("div", { "class": "rr" }, inp, sendBtn), h("div", { "class": "cap", text: s.unverified ? "Unverified data from the Mac: replying is off." : unp ? "Pair this device first to reply." : s.online ? (s.status === "running" ? "Claude is working. Your message waits 5 s (Undo), then Claude reads it after the current step." : "You\u2019ll see exactly what gets sent before it goes.") : s.machine + " is offline. Replies come back when it reconnects." }));
+  /* Quick replies: only while the session is asking you something. One tap sends the fixed text (these never change, so no confirm). */
+  var canChip = s.online && !busy && !unp && peekAsks(view, now), chips = canChip ? h("div", { "class": "qchips", role: "group", "aria-label": "Quick replies" },
+    QUICK_REPLIES.map(function (t) { return h("button", { "class": "qchip", type: "button", "data-k": "qc-" + t, onclick: function () { if (S.busy["send:" + s.id]) return; if (s.status === "running") queueReply(s, t); else doSend(s, t); toast("Sent: \u201c" + t + "\u201d"); }, text: t }); })) : null;
+  var comp = h("div", { "class": "fcomp" }, chips, h("div", { "class": "rr" }, inp, sendBtn), h("div", { "class": "cap", text: s.unverified ? "Unverified data from the Mac: replying is off." : unp ? "Pair this device first to reply." : s.online ? (s.status === "running" ? "Claude is working. Your message waits 5 s (Undo), then Claude reads it after the current step." : "You\u2019ll see exactly what gets sent before it goes.") : s.machine + " is offline. Replies come back when it reconnects." }));
   var grab = h("div", { "class": "fgrab", "aria-hidden": "true" }, h("i"));
   var sheet = h("section", { "class": "fsheet" + (docked ? " docked" : ""), role: "dialog", "aria-modal": docked ? null : "true", "aria-labelledby": "ft" }, grab, head, acts, log, comp);
   grabHandlers(grab, sheet);
@@ -3997,6 +4045,11 @@ function init() {
   /* refresh on a timer and when the page comes back to the front (timer 5 min, on return 2 min); Refresh also lives in the menu */
   S.lastRefreshAt = Date.now();
   function autoRefresh(gap) { if (S.db && document.visibilityState !== "hidden" && Date.now() - S.lastRefreshAt > gap) doRefresh(true); }
+  function markSeen() { lsSet("mc-last-seen", String(Date.now())); }
+  function checkAway() { var last = Number(lsGet("mc-last-seen")); S.awaySince = isFinite(last) && last > 0 && Date.now() - last >= AWAY_MS ? last : 0; markSeen(); }
+  checkAway(); setInterval(function () { if (document.visibilityState !== "hidden") markSeen(); }, 60000);
+  window.addEventListener("pagehide", markSeen);
+  document.addEventListener("visibilitychange", function () { if (document.visibilityState === "hidden") markSeen(); else { checkAway(); render(true); } });
   document.addEventListener("visibilitychange", function () {
     if (document.visibilityState === "hidden") parkQueue();
     else { if (S.parked) { S.parked = false; toast("A queued message went back to its reply box. Send it again when you are ready."); render(true); } autoRefresh(120000); if (S.focus) focusTick(); }
@@ -4008,7 +4061,7 @@ function init() {
   window.addEventListener("pageshow", wakeDb);
   window.addEventListener("online", wakeDb);
   setInterval(assistTick, 1000);
-  setInterval(function () { checkRefresh(); checkSendWatch(); checkPairWatch(); render(); autoRefresh(300000); }, 5000); // re-check online / offline (30 s rule) and ages
+  setInterval(function () { checkRefresh(); checkSendWatch(); checkReqWatch(); checkPairWatch(); render(); autoRefresh(300000); }, 5000); // re-check online / offline (30 s rule) and ages
   render(true);
   connect();
 }
