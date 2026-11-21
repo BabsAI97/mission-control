@@ -3481,18 +3481,23 @@ function peekInfo() {
   if (s) {
     var meta = sessionMeta(s, S.now), v = S.peek[id], last = v && v.items.length ? v.items[v.items.length - 1] : null;
     var asks = peekAsks(v, S.now);
-    return { title: s.title, ask: asks ? last.text.replace(/\s+/g, " ").slice(0, 70) : "", cap: (asks ? " \u00b7 " + ago(last.at) : meta.sub) + " \u00b7 tap again to open" };
+    return { id: id, title: s.title, ask: asks ? last.text.replace(/\s+/g, " ").slice(0, 70) : "", cap: (asks ? " \u00b7 " + ago(last.at) : meta.sub) + " \u00b7 tap to open",
+      open: function () { openFocus(s.id); } };
   }
   var g = S.group && m.gmap[S.group], list = !S.group ? m.groups : (g ? (S.sub ? [] : g.subs) : []);
   var nd = list.filter(function (x) { return x.id === id; })[0];
-  return nd ? { title: nd.name, ask: "", cap: plural(nd.sessions.length, "session", "sessions") + " \u00b7 tap again to open" } : null;
+  var grp = S.group;
+  return nd ? { id: id, title: nd.name, ask: "", cap: plural(nd.sessions.length, "session", "sessions") + " \u00b7 tap to open",
+    open: function () { if (!grp) go(nd.id, null); else go(grp, nd.id); } } : null;
 }
 function renderPeekLine() {
   var host = $("peekHost"), info = S.focus ? null : peekInfo(), key = info ? JSON.stringify([info, S.list]) : "";
   if (host.getAttribute("data-key") === key) return;
   host.setAttribute("data-key", key); clear(host);
   if (!info) return;
-  host.appendChild(h("div", { "class": "peekcard" + (S.list ? " nopill" : ""), role: "status" },
+  /* The card itself opens the item (same as tapping the selected bubble again). */
+  host.appendChild(h("button", { "class": "peekcard" + (S.list ? " nopill" : ""), type: "button", "aria-label": "Open " + info.title,
+    onclick: function () { if (Date.now() < S.suppressUntil) return; info.open(); } },
     h("div", { "class": "pt", text: info.title }),
     h("div", { "class": "cap" }, info.ask ? [h("b", { text: "Asks: " }), info.ask] : null, info.cap)));
 }
