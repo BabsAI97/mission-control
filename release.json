@@ -1,8 +1,9 @@
 {
   "v": 8,
   "files": {
+    "README.md": "7d4dae276e29e792b3a6d36d37f7777844b33627e0480f40d36da0c1a199b269",
     "app.js": "f9704a94d25785c277a26a73471d8bfdc2f059bd9ada23f231044a73072f0747",
-    "config.js": "d4c3bfa8c60fe77a94d6b28fe017d2ad749ce57e0f113ef446010f047073d8d2",
+    "config.js": "6c15f7216e961e1ae126b957affaed3f36466a74c464d2df53fe206ee3a8423d",
     "guard.js": "3c8c7597ffed38ea077179d08b947d4550c4faf5484cab0e000989f5d710f537",
     "icons/icon-180.png": "b8432959d8adf3d86dcb455b610b0fcdf84c92e7d0ee76fefe0254f6adb058c1",
     "icons/icon-192.png": "b577cbce233f0074fa6cfe35ac9493bd5f6c960c4b2a263a080d3b47f429e827",
