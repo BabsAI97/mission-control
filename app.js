@@ -37,7 +37,9 @@ var S = {
   assistInfo: null, assistAbout: "", assistDraft: "", assistLocal: [], assistSentAt: 0, assistAiAtSend: 0, assistLast: null, assistReq: null, cardState: Object.create(null), pairWatch: null,
   sig: Object.create(null), manifest: Object.create(null), docHash: Object.create(null), docAt: Object.create(null), mine: Object.create(null), ownSig: Object.create(null), hbNewest: Object.create(null), docMachine: Object.create(null), peekMin: Object.create(null), sigSeq: Object.create(null), ing: Object.create(null), rawReqs: [], reqVer: Object.create(null), pairDocs: { Mac: null, PC: null },
   gn: { Mac: undefined, PC: undefined }, agents: { Mac: undefined, PC: undefined }, apData: null,
-  ap: { seg: "tonight", sel: { tonight: null, agents: null, results: null }, dec: Object.create(null), note: "", noteOpen: false, q: "" }
+  ap: { seg: "tonight", sel: { tonight: null, agents: null, results: null }, dec: Object.create(null), note: "", noteOpen: false, q: "" },
+  /* r3 Quick actions: the sheet, its drafts, requests it is waiting on (pend), cards just answered (done), ticked chats (sel), a bulk archive in flight (arch), the last reload result */
+  qa: { open: false, seg: "wait", opener: null, drafts: Object.create(null), pend: Object.create(null), done: Object.create(null), sel: Object.create(null), arch: null, reload: null, reloadReq: null, qsel: Object.create(null), awayReq: null, awayMin: 0, keepReq: null, tidy: null }
 };
 var unsubs = [];
 var peekUnsub = null;
@@ -274,7 +276,8 @@ function mapSessions(list, machine, online, now, titles, unverified) {
     var last = Date.parse(s.lastActivityAt), running = !!s.isRunning;
     var title = capText(s.title, CAP_TITLE) || "Untitled session";
     titles[s.id] = title;
-    out.push({ id: s.id, title: title, running: running, pinned: !!s.pinned, waiting: s.waiting === true, last: last,
+    var q = quickFields(s, running); // r3: waitKind / ask / stuckFor / rc, cleaned
+    out.push({ id: s.id, title: title, running: running, pinned: !!s.pinned, waiting: s.waiting === true, last: last, waitKind: q.waitKind, ask: q.ask, stuckFor: q.stuckFor, rc: q.rc, sched: s.sched === true,
       group: capText(s.group) || "unsorted", sub: capText(s.sub) || "unsorted", machine: machine, online: online, unverified: !!unverified,
       status: running ? "running" : ((!isNaN(last) && now - last > STALE_MS) ? "stale" : "idle") });
   });
@@ -618,7 +621,7 @@ function listTargets(machines, now, onlineMs) {
 /** The fields of each request the page creates (contract v0.3.5): send/archive are targeted at the computer that lists the session; send carries a 5 min ttl; Refresh = one targeted list per online computer, or one untargeted list when none is online. */
 function sendFields(sid, text, machines, about, target) { var f = { action: "send", sessionId: sid, text: text, target: target || pickTarget(sid, machines), ttlSec: SEND_TTL_SEC }; if (about) f.about = about; return f; }
 /** ttlSec for every action the app creates (contract v0.7.2: 60-300). */
-var REQ_TTL = { send: 300, peek: 60, list: 60, archive: 120, restore: 120, start: 300, "agent-save": 300, "agent-run": 300, "agent-toggle": 300, "agent-delete": 300, "research-now": 300, unpair: 120, "pair-start": 120, pair: 120 };
+var REQ_TTL = { send: 300, peek: 60, list: 60, archive: 120, restore: 120, start: 300, "agent-save": 300, "agent-run": 300, "agent-toggle": 300, "agent-delete": 300, "research-now": 300, unpair: 120, "pair-start": 120, pair: 120, answer: 120, "reload-config": 60, "away-set": 120, "perm-answer": 120, "q-answer": 120, "keep-awake": 120, "tidy-refresh": 60, "tidy-apply": 300, "tidy-undo": 120 };
 function archiveFields(sid, machines) { return { action: "archive", sessionId: sid, target: pickTarget(sid, machines) }; }
 function refreshFields(machines, now, onlineMs) {
   var ts = listTargets(machines, now, onlineMs);
@@ -640,7 +643,17 @@ function requestBody(f, id, iso) {
   if (f.action === "research-now") body.question = f.question;
   if (f.action === "pair") { body.deviceName = f.deviceName; body.pubKey = jwkPublic(f.pubKey || {}); if (f.dhKey) body.dhKey = jwkPublic(f.dhKey); }
   if (f.action === "unpair") body.removeDeviceId = f.removeDeviceId;
-  if (f.action === "start") { body.title = f.title; body.prompt = f.prompt; body.kind = f.kind; body.project = f.project == null ? null : f.project; }
+  // r4: every field is one the contract names; the answers repeat the pending item's own itemId + inputHash
+  if (f.action === "away-set") { body.on = f.on === true; body.timeoutMin = f.timeoutMin; }
+  if (f.action === "keep-awake") body.on = f.on === true;
+  if (f.action === "perm-answer") { body.itemId = f.itemId; body.inputHash = f.inputHash; body.decision = f.decision; }
+  if (f.action === "q-answer") { body.itemId = f.itemId; body.inputHash = f.inputHash; if (f.answers !== undefined) body.answers = f.answers.slice(); else body.answer = f.answer; if (f.other === true) body.other = true; }
+  if (f.action === "tidy-apply") body.items = (f.items || []).map(function (i) { return { sessionId: i.sessionId, dest: Object.assign({}, i.dest) }; });
+  if (f.action === "tidy-undo") body.applyId = f.applyId;
+  // r3: a start of kind command / saved carries ONLY the command key or the saved prompt's id: no title, no prompt, no project (the Mac refuses any text for these kinds)
+  if (f.action === "start" && f.kind === "command") { body.kind = "command"; body.command = f.command; }
+  else if (f.action === "start" && f.kind === "saved") { body.kind = "saved"; body.savedId = f.savedId; }
+  else if (f.action === "start") { body.title = f.title; body.prompt = f.prompt; body.kind = f.kind; body.project = f.project == null ? null : f.project; }
   return body;
 }
 /** "Expires HH:MM" for a pending send (status new, with ttlSec); "Expired" once past; "" otherwise. ttlSec is clamped to 10-3600 like the bridge does. */
@@ -659,16 +672,16 @@ function derive() {
     if (m) { t = Date.parse(m.lastSeen); online = !isNaN(t) && (S.now - t) < ONLINE_MS; }
     var verified = !S.sig || S.sig["machines/" + n] === "ok", heldKey = !!(typeof DEV !== "undefined" && DEV.macKeys && DEV.macKeys[n]), mine = m && (verified || heldKey) ? mapSessions(m.sessions, n, online, S.now, S.titles, !verified) : [];
     mstat[n] = { exists: !!m, online: online, lastSeen: t, version: m ? str(m.version) : "", mode: m ? str(m.mode) : "", pairing: m && m.pairing === "paired" ? "paired" : "none", total: m && isFinite(Number(m.total)) ? Number(m.total) : null,
-      pairLocked: !!m && m.pairLocked === true, devicePaired: false, verified: verified, sigState: (S.sig && S.sig["machines/" + n]) || "pending", usage: m && verified ? cleanUsage(m.usage) : null, caps: cleanCaps(m && m.caps), startReason: verified && m && m.startReason === "not enabled" ? "starting is off on the Mac" : "", assistant: cleanAssistant(m && m.assistant), devices: verified ? cleanDevices(m && m.devices) : [], quotaWarn: verified ? cleanQuotaWarn(m && m.quotaWarn) : "", lastError: m ? str(m.lastError) : "", lastErrorAt: m ? Date.parse(m.lastErrorAt) : NaN, shown: mine.length };
+      pairLocked: !!m && m.pairLocked === true, devicePaired: false, verified: verified, sigState: (S.sig && S.sig["machines/" + n]) || "pending", usage: m && verified ? cleanUsage(m.usage) : null, caps: cleanCaps(m && m.caps), startReason: verified && m && m.startReason === "not enabled" ? "starting is off on the Mac" : "", assistant: cleanAssistant(m && m.assistant), devices: verified ? cleanDevices(m && m.devices) : [], quotaWarn: verified ? cleanQuotaWarn(m && m.quotaWarn) : "", saved: verified ? cleanSaved(m && m.saved) : [], away: verified ? cleanAway(m && m.away) : cleanAway(null), keepAwake: verified ? cleanKeepAwake(m && m.keepAwake) : cleanKeepAwake(null), pending: verified ? cleanPending(m && m.pending) : [], tidy: verified ? cleanTidy(m && m.tidy) : cleanTidy(null), configLoadedAt: verified && m ? str(m.configLoadedAt).slice(0, 40) : "", lastError: m ? str(m.lastError) : "", lastErrorAt: m ? Date.parse(m.lastErrorAt) : NaN, shown: mine.length };
     if (!m) return;
     buildTree(m.tree, tree);
     mine.forEach(function (x) { sessions.push(x); });
   });
   NAMES.forEach(function (n) { mstat[n].youPaired = deviceListed(mstat[n], n, { state: DEV.state, hasKey: !!DEV.priv, deviceId: DEV.deviceId, justPaired: DEV.justPaired, pairedMachine: DEV.pairedMachine }, Date.now()); });
   var gs = groupSessions(sessions, tree), groups = gs.groups, gmap = gs.gmap;
-  var sig = JSON.stringify([sessions.map(function (s) { return [s.id, s.title, s.status, s.pinned, s.waiting, s.machine, s.online, s.group, s.sub, Math.floor(s.last / 60000)]; }),
+  var sig = JSON.stringify([sessions.map(function (s) { return [s.id, s.title, s.status, s.pinned, s.waiting, s.machine, s.online, s.group, s.sub, Math.floor(s.last / 60000), s.waitKind, s.ask, s.stuckFor, s.rc, s.sched]; }),
     groups.map(function (g) { return [g.id, g.name, g.subs.map(function (x) { return x.name; })]; }),
-    NAMES.map(function (n) { return [mstat[n].exists, mstat[n].online, mstat[n].mode, mstat[n].total, mstat[n].shown, mstat[n].caps, mstat[n].lastError]; })]);
+    NAMES.map(function (n) { return [mstat[n].exists, mstat[n].online, mstat[n].mode, mstat[n].total, mstat[n].shown, mstat[n].caps, mstat[n].lastError, mstat[n].saved, mstat[n].configLoadedAt, mstat[n].away, mstat[n].keepAwake, mstat[n].pending, mstat[n].tidy]; })]);
   var neverSeen = S.machines.Mac === null && S.machines.PC === null;
   var loaded = S.machines.Mac !== undefined && S.machines.PC !== undefined;
   var byId = Object.create(null); // a session listed by both computers belongs to the one seen most recently (same rule as pickTarget)
@@ -1092,7 +1105,7 @@ function comingUp(items, now) {
   return (Array.isArray(items) ? items : []).filter(function (x) { return x.enabled && isFinite(x.next) && x.next >= now - 300000 && x.next <= now + COMING_MS; }).slice(0, 3);
 }
 /* ---------- bridge caps, start and restore (contract v0.6) ---------- */
-function cleanCaps(c) { c = c && typeof c === "object" ? c : {}; return { peek: c.peek === true, start: c.start === true, restore: c.restore === true, assistant: c.assistant === true, pairing: c.pairing === true }; }
+function cleanCaps(c) { c = c && typeof c === "object" ? c : {}; return { peek: c.peek === true, start: c.start === true, restore: c.restore === true, assistant: c.assistant === true, pairing: c.pairing === true, quick: c.quick === true }; }
 /** Where a start goes: an online computer whose heartbeat says caps.start is true (Mac first). reason explains a disabled button. */
 function startGate(mstat) {
   var online = NAMES.filter(function (n) { return mstat && mstat[n] && mstat[n].exists && mstat[n].online; });
@@ -1181,7 +1194,7 @@ function retryGate(r, mstat, machines, listed) {
 /** Labelled lines for an expanded Activity row and for "Copy details". */
 function activityDetails(r, sessionTitle) {
   if (r._foreign) return [["What", "Request details not verified"], ["Status", str(r.status)]].concat([["Created", r.createdAt], ["Done", r.doneAt]].map(function (p) { var t = Date.parse(p[1]); return isFinite(t) ? [p[0], dayMonth(t) + " " + hhmm(t)] : null; }).filter(Boolean));
-  var out = [["What", ({ send: "Reply", archive: "Archive", list: "Refresh", peek: "Peek", start: "Start session", restore: "Restore", "agent-save": "Save agent", "agent-run": "Run agent", "agent-toggle": "Agent on/off", "research-now": "Research", pair: "Pair device", unpair: "Remove device" })[r.action] || str(r.action)], ["Status", str(r.status)]];
+  var out = [["What", ({ send: "Reply", archive: "Archive", list: "Refresh", peek: "Peek", start: "Start session", restore: "Restore", "agent-save": "Save agent", "agent-run": "Run agent", "agent-toggle": "Agent on/off", "research-now": "Research", pair: "Pair device", unpair: "Remove device", "away-set": "Away mode", "perm-answer": "Permission answer", "q-answer": "Question answer", "keep-awake": "Keep awake", "tidy-refresh": "Tidy refresh", "tidy-apply": "Tidy", "tidy-undo": "Undo Tidy" })[r.action] || str(r.action)], ["Status", str(r.status)]];
   if (sessionTitle) out.push(["Session", sessionTitle]);
   if (r.action === "start" && r.title) out.push(["Title", str(r.title)]);
   if (r.machine || r.target) out.push(["Computer", str(r.machine || r.target)]);
@@ -1597,7 +1610,7 @@ function signedPart(doc) {
   Object.keys(doc).forEach(function (k) { if (UNSIGNED_FIELDS.indexOf(k) < 0 && k !== "resultSig" && k !== "retryAt" && k.charAt(0) !== "_" && doc[k] !== undefined) o[k] = doc[k]; });
   return o;
 }
-var BRIDGE_REQ_FIELDS = ["status", "result", "error", "doneAt", "machine", "claimedAt", "claimToken", "resultSig", "retryAt"];
+var BRIDGE_REQ_FIELDS = ["status", "result", "error", "doneAt", "machine", "claimedAt", "claimToken", "resultSig", "retryAt"]; // r4.1 (L3): applyId comes only from the signed result text; request fields are never written by the Mac
 /**
  * A request as the page shows it. The Mac's result signature does not cover the request's own fields, so what was asked comes ONLY from this device's own stored copy
  * (mine.body); the Mac contributes just its own fields. With no stored copy, the document's own device signature (sigVerdict "ok") vouches for it; otherwise it is _foreign:
@@ -1717,6 +1730,437 @@ function trustRequest(r, verdict) {
   return Object.assign({}, r, { status: replay ? "unknown" : "unverified", result: "", error: "", _status: r.status });
 }
 /* @pure-end */
+/* @pure-start */
+/* ---------- r3 Quick actions (mission-control-relay/protocol/PROTOCOL.md "r3"; approved mock: mockups-quick-actions/mock.html v2) ---------- */
+var QA_KINDS = ["question", "turn", "stuck"], QA_ASK_MAX = 300, QA_DONE_MS = 180000, QA_SAVED_MAX = 20, QA_MAX_TICK = 20, QA_ARCHIVE_WAIT_MS = 120000;
+/** The Run tiles, in the mock's order. `cmd` is all the request carries; the prompt itself is fixed on the Mac. */
+var QA_COMMANDS = [
+  { cmd: "tidy", name: "/tidy", sub: "What's running, waiting, done", desc: "See what's in flight; archives nothing until you approve." },
+  { cmd: "briefing", name: "/briefing", sub: "Audio of my latest notes", desc: "Make an audio briefing of recent notes." },
+  { cmd: "gn", name: "/gn", sub: "Start the overnight run", desc: "Start the overnight run. You approve the task list in that chat." },
+  { cmd: "gm", name: "/gm", sub: "End the night run, brief me", desc: "End the overnight run and brief me." },
+  { cmd: "handoff-all", name: "/handoff-all", sub: "List long chats (dry run)", desc: "Dry run: lists chats over 50% context. Nothing restarts until you say apply." }
+];
+/** The heartbeat's r3 fields for one session, cleaned: a kind that contradicts the session's own running flag is dropped; `ask` only for a turn (capped); `stuckFor` only for stuck (2-999). */
+function quickFields(s, running) {
+  var k = s && QA_KINDS.indexOf(s.waitKind) >= 0 ? s.waitKind : "";
+  if ((k === "turn" && running) || ((k === "question" || k === "stuck") && !running)) k = "";
+  var mins = Math.floor(Number(s && s.stuckFor));
+  return { waitKind: k, ask: k === "turn" ? str(s.ask).replace(/[\u0000-\u001f\u007f]+/g, " ").replace(/\s+/g, " ").trim().slice(0, QA_ASK_MAX) : "",
+    stuckFor: k === "stuck" ? (isFinite(mins) && mins >= 2 ? Math.min(999, mins) : 2) : 0, rc: !!s && s.rc === true };
+}
+/** The Waiting cards (r4): the Mac's pending questions and permissions (Away mode), every verified session with a waitKind (or, from an older bridge, the plain `waiting` flag = your turn).
+ *  Sections: question, your turn, permission. A stuck chat that already has a pending permission item shows only that item; otherwise it shows the "waiting on the Mac" card.
+ *  done = { id: { msg, kind, at, title } }: a card just answered from here stays as a green "done" line for 3 minutes (a pending item that has already left the heartbeat keeps its line too).
+ *  r4 = { pending: [item + machine + online], away: cleanAway() }; without it the cards are the r3 ones. */
+function quickCards(byId, needs, done, now, r4) {
+  var out = [], rank = { q: 0, turn: 1, perm: 2 }, away = (r4 && r4.away) || cleanAway(null), pend = (r4 && r4.pending) || [], pSess = Object.create(null), seen = Object.create(null);
+  function live(id) { return done && done[id] && now - done[id].at < QA_DONE_MS ? done[id] : null; }
+  pend.forEach(function (p) {
+    if (!p || p.expiresAt <= now) return;
+    var d = live(p.itemId), q = p.kind === "question";
+    seen[p.itemId] = true; if (p.sessionId) pSess[p.kind + ":" + p.sessionId] = true;
+    out.push({ id: p.itemId, kind: q ? "pq" : "pp", sec: q ? "q" : "perm", title: p.title, machine: p.machine, online: p.online !== false, ask: p.question, item: p, awayOn: away.on, awayKnown: away.known, done: d ? str(d.msg) : "", last: p.createdAt, rc: false, stuckFor: 0 });
+  });
+  Object.keys(done || {}).forEach(function (id) { // answered here, already gone from the heartbeat: keep the green line
+    var d = live(id); if (!d || seen[id] || !QA_HEX32.test(id)) return;
+    out.push({ id: id, kind: d.kind === "question" ? "pq" : "pp", sec: d.kind === "question" ? "q" : "perm", title: str(d.title) || "Untitled session", machine: "", online: true, ask: "", item: null, awayOn: away.on, awayKnown: away.known, done: str(d.msg), last: d.at, rc: false, stuckFor: 0 });
+  });
+  Object.keys(byId || {}).forEach(function (id) {
+    var s = byId[id]; if (!s || s.unverified) return;
+    var kind = s.waitKind || (needs && needs[id] && s.status !== "running" ? "turn" : "");
+    var d = live(id);
+    if (!kind && !d) return;
+    if (!d && ((kind === "question" && pSess["question:" + id]) || (kind === "stuck" && pSess["permission:" + id]))) return; // the pending item is the card
+    out.push({ id: id, title: s.title, machine: s.machine, online: !!s.online, kind: d ? d.kind : kind, sec: (d ? d.kind : kind) === "turn" ? "turn" : (d ? d.kind : kind) === "question" ? "q" : "perm", ask: str(s.ask), stuckFor: s.stuckFor || 0, rc: s.rc === true, awayOn: away.on, awayKnown: away.known, done: d ? str(d.msg) : "", last: s.last });
+  });
+  out.sort(function (a, b) { return (rank[a.sec] - rank[b.sec]) || ((isFinite(b.last) ? b.last : 0) - (isFinite(a.last) ? a.last : 0)) || (a.id < b.id ? -1 : 1); });
+  return out.slice(0, 30);
+}
+/** The badge on the button, the segment and the banner: cards still waiting (done ones no longer count). */
+function quickCount(cards) { return (cards || []).filter(function (c) { return !c.done; }).length; }
+function quickBannerText(n) { return n ? n + " chat" + (n > 1 ? "s" : "") + " waiting on you" : "Nothing waiting on you"; }
+function quickAria(n) { return "Quick actions" + (n ? ", " + n + " waiting" : ""); }
+function stuckChip(mins) { return "Stuck " + Math.max(2, Math.floor(Number(mins)) || 2) + " min"; }
+/** Request fields. answer = stop the question, then send the text (r3 R3.2). */
+function answerFields(sid, text, machines) { return { action: "answer", sessionId: sid, text: text, target: pickTarget(sid, machines), ttlSec: 120 }; }
+/** A Run tile: /gn keeps its own start kind; the others are kind "command" and carry ONLY the command key (no title, no prompt, no project). null for anything else. */
+function commandFields(cmd, target) {
+  if (cmd === "gn") return gnStartFields(target);
+  if (!QA_COMMANDS.some(function (c) { return c.cmd === cmd; })) return null;
+  return { action: "start", kind: "command", command: cmd, target: target, ttlSec: START_TTL_SEC };
+}
+function savedFields(id, target) { return /^[a-z0-9-]{1,40}$/.test(str(id)) ? { action: "start", kind: "saved", savedId: id, target: target, ttlSec: START_TTL_SEC } : null; }
+function reloadFields(target) { return { action: "reload-config", target: target, ttlSec: 60 }; }
+/** The heartbeat's saved prompts: id, title and desc only (the prompt text never leaves the Mac). At most 20; anything odd is dropped. */
+function cleanSaved(list) {
+  var out = [];
+  (Array.isArray(list) ? list : []).forEach(function (x) {
+    if (out.length >= QA_SAVED_MAX || !x || typeof x !== "object" || !/^[a-z0-9-]{1,40}$/.test(str(x.id)) || out.some(function (o) { return o.id === x.id; })) return;
+    var title = apStr(x.title, 59); if (!title) return;
+    out.push({ id: x.id, title: title, desc: apStr(x.desc, 120) });
+  });
+  return out;
+}
+/** Where an r3 request goes: an online, verified computer this device is paired with whose bridge says caps.quick (Mac first). reason explains a disabled button. */
+function quickGate(mstat) {
+  var online = NAMES.filter(function (n) { return mstat && mstat[n] && mstat[n].exists && mstat[n].online; });
+  if (!online.length) return { ok: false, target: "", reason: "computer offline" };
+  var seen = online.filter(function (n) { return mstat[n].verified !== false; });
+  if (!seen.length) return { ok: false, target: "", reason: "unverified data" };
+  var paired = seen.filter(function (n) { return mstat[n].youPaired !== false; });
+  if (!paired.length) return { ok: false, target: "", reason: "pair this device first" };
+  var ok = paired.filter(function (n) { return mstat[n].caps && mstat[n].caps.quick === true; });
+  return ok.length ? { ok: true, target: ok[0], reason: "" } : { ok: false, target: "", reason: "needs Mac update" };
+}
+/** The Archive list: done or stale chats only. Never running, pinned, waiting on you, unverified, on an offline computer, the Assistant or a /gn chat.
+ *  Nor a scheduled task's chat (heartbeat `sched`). (Parents with a child that still needs you are not in the heartbeat: the Mac checks those before it archives, r3 R3.5.) Oldest first. */
+function archiveCandidates(byId, o) {
+  var out = [], gn = (o && o.gnIds) || [], needs = (o && o.needs) || {};
+  Object.keys(byId || {}).forEach(function (id) {
+    var s = byId[id];
+    if (!s || s.unverified || !s.online || s.running || s.status === "running" || s.pinned || s.waitKind || s.waiting || needs[id]) return;
+    if (s.sched) return; // fix round 1: a scheduled task's chat (heartbeat `sched`) is never offered; the Mac refuses it anyway
+    if ((o && o.assistantId && id === o.assistantId) || gn.indexOf(id) >= 0 || (o && o.pins && o.pins[id])) return;
+    if (!/^local_[0-9a-f-]{36}$/.test(id)) return;
+    out.push({ id: id, title: s.title, machine: s.machine, state: s.status === "stale" ? "Stale" : "Done", last: s.last });
+  });
+  out.sort(function (a, b) { return ((isFinite(a.last) ? a.last : 0) - (isFinite(b.last) ? b.last : 0)) || (a.id < b.id ? -1 : 1); });
+  return out.slice(0, 100);
+}
+function archiveMeta(c) { return c.state + " \u00b7 " + (isFinite(c.last) ? ago(c.last) : "no activity"); }
+/** Tick or untick one chat. At most QA_MAX_TICK ticked: a tick past that changes nothing and says so (full). */
+function tickToggle(sel, id, max) {
+  var out = Object.assign(Object.create(null), sel || {}), n = Object.keys(out).length;
+  if (out[id]) { delete out[id]; return { sel: out, full: false }; }
+  if (n >= (max || QA_MAX_TICK)) return { sel: out, full: true };
+  out[id] = true; return { sel: out, full: false };
+}
+/** Select all: ticks the first `max` listed chats; when those are all ticked already, unticks everything. */
+function tickAll(sel, ids, max) {
+  var first = (ids || []).slice(0, max || QA_MAX_TICK), all = first.length > 0 && first.every(function (id) { return sel && sel[id]; }), out = Object.create(null);
+  if (!all) first.forEach(function (id) { out[id] = true; });
+  return out;
+}
+/** Ticked ids that are still in the list (a chat that left the list is never sent). */
+function tickedIds(sel, cands) { return (cands || []).map(function (c) { return c.id; }).filter(function (id) { return sel && sel[id]; }).slice(0, QA_MAX_TICK); }
+function archiveBtnText(n) { return "Archive " + n + " chat" + (n === 1 ? "" : "s"); }
+var QA_SKIP_WORDS = { "still working": "started working again", "tool error: still working": "started working again", "pinned session": "pinned", "tool error: pinned": "pinned", "scheduled task": "a scheduled task\u2019s chat", "gn session": "the /gn chat", "assistant session": "the Assistant", "child still active": "a chat it started may still need you", "parent of the bridge": "it started Mission Control\u2019s own chat", "archive check failed": "could not be checked", "not owned": "no longer listed", "tool error: open on screen": "open on the Mac\u2019s screen", "tool error: not approved": "not approved on the Mac", "timed out - may still complete": "no answer yet" };
+function archiveSkipWord(err) { var t = str(err); return QA_SKIP_WORDS[t] || BRIDGE_ERRORS[t] || t || "not archived"; }
+/** What happened to one bulk archive: reqs = the app's request list, rids = { sessionId: requestId }. */
+function archiveOutcome(ids, rids, reqs) {
+  var o = { done: [], skipped: [], pending: 0, kids: [], kidOf: {} }; // kids = child chats the Mac says went with a parent (fix round 1): Undo restores them too
+  (ids || []).forEach(function (id) {
+    var rid = rids && rids[id], r = rid ? (reqs || []).filter(function (x) { return x && x.id === rid; })[0] : null;
+    if (!rid) o.skipped.push({ id: id, why: "not sent" });
+    else if (r && r.status === "done" && r.action === "archive") { o.done.push(id); archiveKids(r.result, id).forEach(function (k) { if (o.kids.indexOf(k) < 0 && (ids || []).indexOf(k) < 0) { o.kids.push(k); o.kidOf[k] = id; } }); }
+    else if (r && r.status === "error") o.skipped.push({ id: id, why: archiveSkipWord(r.error) });
+    else o.pending++;
+  });
+  return o;
+}
+/** The child chats named in an archive result ("archived (with 2 child chats: local_…, local_…)"): valid ids only, never the parent itself, at most 10. */
+function archiveKids(result, parent) {
+  var t = str(result), out = [];
+  if (!/^archived \(with \d+ child chats?: /.test(t)) return out;
+  (t.match(/local_[0-9a-f-]{36}/g) || []).forEach(function (k) { if (k !== parent && out.indexOf(k) < 0 && out.length < 10) out.push(k); });
+  return out;
+}
+/** "Archived 3" (the toast adds the Undo button) with the skipped ones named: "Archived 2 · skipped 1 (started working again)". */
+function archiveToastText(o) {
+  var whys = []; o.skipped.forEach(function (s) { if (whys.indexOf(s.why) < 0) whys.push(s.why); });
+  var t = "Archived " + o.done.length;
+  if (o.kids && o.kids.length) t += " (+" + o.kids.length + " child chat" + (o.kids.length === 1 ? "" : "s") + ")";
+  if (o.skipped.length) t += " \u00b7 skipped " + o.skipped.length + " (" + whys.slice(0, 2).join(", ") + ")";
+  if (o.pending) t += " \u00b7 " + o.pending + " still waiting for the Mac";
+  return t;
+}
+/** The Mac card's result line after a reload: the bridge's own result ("reloaded 09:41 · no changes"), or plain words for its refusal. */
+function reloadText(r) {
+  if (!r) return { ok: false, text: "" };
+  if (r.status === "done" && /^reloaded \d\d:\d\d \u00b7 (no changes|changed: [A-Za-z, ]{1,80})$/.test(str(r.result))) return { ok: true, text: "\u2713 R" + str(r.result).slice(1) };
+  var e = str(r.error), words = { "restart needed": "Restart needed: that change needs /reload-plugins at the Mac. Nothing was changed.", "slow down": "Reload runs at most once a minute. Try again shortly.", "config unreadable": "The Mac could not read its settings file. The old settings stay.", "config invalid": "The settings file on the Mac is not valid. The old settings stay.", "reload unavailable": "This bridge cannot reload its settings. Update it on the Mac.", "unknown action": "This bridge cannot reload its settings. Update it on the Mac." };
+  return { ok: false, text: words[e] || BRIDGE_ERRORS[e] || (r.status === "done" ? "Reloaded." : "Not reloaded: " + (e || "unknown error")) };
+}
+/** "Now: Start from phone On · Relay Connected · Loaded 08:12" as parts (the page colours On / Connected). m = mstat entry, relay = the relay state word. */
+function macNow(m, relay) {
+  var t = m ? Date.parse(m.configLoadedAt) : NaN;
+  return { start: !!(m && m.caps && m.caps.start === true), relay: relay === "ready" ? "Connected" : relay === "connecting" ? "Connecting" : "Offline", relayOk: relay === "ready", loaded: isFinite(t) ? hhmm(t) : "" };
+}
+/** Every confirm sheet's words (the mock's, verbatim). kind: run | arch | reload | ans. (A your-turn reply has no confirm sheet, as in the mock.) */
+function quickConfirm(kind, o) {
+  o = o || {};
+  if (kind === "run") return { title: "Start " + o.name + " on the Mac?", body: o.desc + " Opens as a new chat; you'll see it in Sessions.", ok: "Start" };
+  if (kind === "arch") return { title: "Archive " + o.n + " chat" + (o.n === 1 ? "" : "s") + "?", body: "Archive only, never delete. You can restore them with Undo, or later from Activity.", ok: "Archive" };
+  if (kind === "reload") return { title: "Reload bridge settings?", body: "The Mac re-reads its settings file. Takes about 5 seconds.", ok: "Reload" };
+  if (kind === "ans") return { title: "Send this answer?", body: "The Mac stops the question in \"" + o.title + "\" and sends your text as the next message. The chat sees it came from Mission Control.", ok: "Send" };
+  if (kind === "allow") return { title: "Allow this command once?", body: "Runs only this exact command in " + o.title + ". Anything else still asks.", ok: "Allow" };
+  if (kind === "away") return { title: "Turn on Away mode?", body: "Your phone will answer Allow/Deny prompts for every Mac chat until you turn it off.", ok: "Turn on" };
+  return { title: "", body: "", ok: "OK" };
+}
+/** r3: plain words for the new refusals. */
+Object.assign(BRIDGE_ERRORS, {
+  "no question waiting": "That question is no longer waiting: it was answered, or the chat moved on.",
+  "needs pairing": "Pair this device first.",
+  "prompt not allowed": "The Mac refused it: this kind of start carries no text.",
+  "bad command": "The Mac doesn\u2019t know that command.",
+  "bad saved id": "The Mac doesn\u2019t know that saved prompt.",
+  "no such saved prompt": "That saved prompt is no longer on the Mac\u2019s list.",
+  "saved prompts unavailable": "The Mac could not read its saved prompts.",
+  "restart needed": "Restart needed: that change needs /reload-plugins at the Mac. Nothing was changed.",
+  "still working": "It started working again, so it was not archived.",
+  "scheduled task": "It belongs to a scheduled task, so it was not archived.",
+  "gn session": "It is the /gn chat, so it was not archived.",
+  "assistant session": "It is the Assistant, so it was not archived.",
+  "child still active": "A chat it started may still need you, so it was not archived.",
+  "archive check failed": "The Mac could not check it, so it was not archived.",
+  "parent of the bridge": "It started the chat that runs Mission Control on the Mac, so it was not archived.",
+  "not stopped": "The Mac could not stop the question, so your answer was not sent. Answer it in the Claude app or at the Mac.",
+  "answer in progress": "Another answer to that chat is being sent."
+});
+/* ---------- r4 Phone-only: Away mode, real questions and permissions, Tidy (SPEC-phone-only.md "r4 contract"; mock v4) ---------- */
+var QA_SID_RE = /^local_[0-9a-f-]{36}$/, QA_PEND_MAX = 20, QA_PERM_MAX = 8000, QA_ANSWER_MAX = 500, QA_MULTI_MAX = 4, QA_TIDY_MAX = 40, QA_AWAY_MINS = [5, 10, 15];
+var QA_HEX32 = /^[0-9a-f]{32}$/, QA_HEX64 = /^[0-9a-f]{64}$/, QA_APPLY_RE = /^[0-9a-f]{32}$/, QA_GROUP_RE = /^[\p{L}\p{N} _·-]{1,40}$/u, QA_GROUP_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$/;
+/** Untrusted text kept for display (a command the user must read): control, zero-width and direction-changing characters are shown as \uXXXX instead of acting. Newlines and tabs stay. */
+function qaClean(s, max) { return str(s).slice(0, max).replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff]/g, function (c) { return "\\u" + ("0000" + c.charCodeAt(0).toString(16)).slice(-4); }); }
+function cleanAway(a) { var k = !!a && typeof a === "object", t = k ? Date.parse(a.setAt) : NaN; return { known: k, on: k && a.on === true, timeoutMin: k && QA_AWAY_MINS.indexOf(a.timeoutMin) >= 0 ? a.timeoutMin : 10, setAt: isFinite(t) ? t : NaN }; }
+function cleanKeepAwake(k) { var o = !!k && typeof k === "object"; return { known: o, available: o && k.available === true, on: o && k.on === true }; }
+/** A question's options: label (the only thing an answer may carry) and description. At most 8; repeats dropped. */
+function cleanOptions(list) {
+  var out = [];
+  (Array.isArray(list) ? list : []).forEach(function (o) {
+    if (out.length >= 8) return;
+    var obj = !!o && typeof o === "object", label = apStr(obj ? o.label : o, QA_ANSWER_MAX);
+    if (!label || out.some(function (x) { return x.label === label; })) return;
+    out.push({ label: label, description: obj ? apStr(o.description, 300) : "" });
+  });
+  return out;
+}
+/** The heartbeat's `pending` items, cleaned (r4): ids and hash must have the exact shape, times must be real. Never trusted for anything but display and the ids the answer repeats. At most 20, order kept (newest first). */
+function cleanPending(list) {
+  var out = [], seen = Object.create(null);
+  (Array.isArray(list) ? list : []).forEach(function (x) {
+    if (out.length >= QA_PEND_MAX || !x || typeof x !== "object") return;
+    var id = str(x.itemId), kind = x.kind, created = Date.parse(x.createdAt), expires = Date.parse(x.expiresAt);
+    if (!QA_HEX32.test(id) || seen[id] || (kind !== "question" && kind !== "permission") || !QA_HEX64.test(str(x.inputHash)) || !isFinite(created) || !isFinite(expires)) return;
+    seen[id] = true;
+    var src = x.summary && typeof x.summary === "object" ? x.summary : x;
+    out.push({ itemId: id, kind: kind, sessionId: QA_SID_RE.test(str(x.sessionId)) ? x.sessionId : "", title: apStr(x.title, 120) || "Untitled session", tool: apStr(x.tool, 60),
+      summary: kind === "permission" ? qaClean(typeof x.summary === "string" ? x.summary : "", QA_PERM_MAX) : "",
+      question: kind === "question" ? apStr(src.question || (typeof x.summary === "string" ? x.summary : ""), 500) : "", options: kind === "question" ? cleanOptions(src.options) : [], multiSelect: kind === "question" && src.multiSelect === true,
+      clipped: kind === "permission" && x.clipped === true, approvable: kind === "permission" && x.approvable === true, why: kind === "permission" && (x.why === "mac-only" || x.why === "too-long") ? x.why : "", inputHash: x.inputHash, createdAt: created, expiresAt: expires });
+  });
+  return out;
+}
+/** "Asked 2 min ago · auto-denies in 8 min" (mock v3). */
+function permAgeText(p, now) {
+  var ago = Math.max(0, Math.floor((now - p.createdAt) / 60000)), left = Math.max(1, Math.ceil((p.expiresAt - now) / 60000));
+  return "Asked " + (ago < 1 ? "just now" : ago + " min ago") + " · auto-denies in " + left + " min";
+}
+/** What the card calls the thing a permission asks to run. */
+function permLead(p) { return !p.tool || p.tool === "Bash" ? "Wants to run:" : "Wants to use " + p.tool + ":"; }
+/** perm-answer: ONLY the item's own id and hash, and allow or deny. Anything else is null (nothing is sent). */
+function permFields(item, decision) {
+  if (!item || !QA_HEX32.test(str(item.itemId)) || !QA_HEX64.test(str(item.inputHash)) || (decision !== "allow" && decision !== "deny") || !item.machine) return null;
+  if (decision === "allow" && item.approvable !== true) return null; // r4.1: never Allow what the Mac says is not approvable from the phone (a missing flag counts as false)
+  return { action: "perm-answer", itemId: item.itemId, inputHash: item.inputHash, decision: decision, target: item.machine, ttlSec: 120 };
+}
+/** q-answer: labels must be this item's own option labels; free text only as "Other" (other: true, 1-500 chars, no control characters) and then nothing else. One label, or up to 4 for multiSelect. null = refuse. */
+function qAnswerFields(item, labels, other) {
+  if (!item || item.kind !== "question" || !QA_HEX32.test(str(item.itemId)) || !QA_HEX64.test(str(item.inputHash)) || !item.machine) return null;
+  var known = (item.options || []).map(function (o) { return o.label; }), picks = [], i;
+  for (i = 0; i < (labels || []).length; i++) { var l = labels[i]; if (known.indexOf(l) < 0 || picks.indexOf(l) >= 0) return null; picks.push(l); }
+  var o = other == null ? "" : str(other).trim();
+  if (o && (o.length > QA_ANSWER_MAX || /[\u0000-\u001f\u007f]/.test(o))) return null;
+  if (o && picks.length) return null; // free text stands alone: answer + other:true (the Mac takes labels in answers, free text in answer)
+  var n = picks.length + (o ? 1 : 0);
+  if (item.multiSelect ? (n < 1 || n > QA_MULTI_MAX) : n !== 1) return null;
+  var f = { action: "q-answer", itemId: item.itemId, inputHash: item.inputHash, target: item.machine, ttlSec: 120 };
+  if (o) { f.answer = o; f.other = true; } else if (item.multiSelect) f.answers = picks; else f.answer = picks[0];
+  return f;
+}
+function awayFields(on, minutes, target) { return { action: "away-set", on: on === true, timeoutMin: QA_AWAY_MINS.indexOf(minutes) >= 0 ? minutes : 10, target: target, ttlSec: 120 }; }
+function keepAwakeFields(on, target) { return { action: "keep-awake", on: on === true, target: target, ttlSec: 120 }; }
+function tidyRefreshFields(target) { return { action: "tidy-refresh", target: target, ttlSec: 60 }; }
+function tidyApplyFields(items, target) { return { action: "tidy-apply", items: items, target: target, ttlSec: 300 }; }
+function tidyUndoFields(applyId, target) { return { action: "tidy-undo", applyId: applyId, target: target, ttlSec: 120 }; }
+function tidyDestOk(d) {
+  if (!d || typeof d !== "object") return false;
+  if (d.kind === "group") return QA_GROUP_ID_RE.test(str(d.groupId));
+  if (d.kind === "new-group") return QA_GROUP_RE.test(str(d.name)) && str(d.name) === str(d.name).trim();
+  return d.kind === "archive";
+}
+/** "" when an r4 request is well formed, else why not. createRequest refuses to send anything this says no to. */
+var R4_ACTIONS = ["away-set", "keep-awake", "perm-answer", "q-answer", "tidy-refresh", "tidy-apply", "tidy-undo"];
+function r4Invalid(f) {
+  if (!f || !f.target) return "no computer";
+  switch (f.action) {
+    case "away-set": return typeof f.on === "boolean" && QA_AWAY_MINS.indexOf(f.timeoutMin) >= 0 ? "" : "bad away request";
+    case "keep-awake": return typeof f.on === "boolean" ? "" : "bad keep-awake request";
+    case "perm-answer": return QA_HEX32.test(str(f.itemId)) && QA_HEX64.test(str(f.inputHash)) && (f.decision === "allow" || f.decision === "deny") ? "" : "bad permission answer";
+    case "q-answer": {
+      if (!QA_HEX32.test(str(f.itemId)) || !QA_HEX64.test(str(f.inputHash))) return "bad question answer";
+      var list = f.answers !== undefined ? f.answers : [f.answer];
+      return Array.isArray(list) && list.length >= 1 && list.length <= QA_MULTI_MAX && list.every(function (a) { return typeof a === "string" && a.length >= 1 && a.length <= QA_ANSWER_MAX; }) && (f.answers === undefined || f.answer === undefined) ? "" : "bad question answer";
+    }
+    case "tidy-refresh": return "";
+    case "tidy-apply": return Array.isArray(f.items) && f.items.length >= 1 && f.items.length <= QA_TIDY_MAX && f.items.every(function (i) { return i && QA_SID_RE.test(str(i.sessionId)) && tidyDestOk(i.dest); }) ? "" : "bad tidy request";
+    case "tidy-undo": return QA_APPLY_RE.test(str(f.applyId)) ? "" : "bad undo request";
+  }
+  return "unknown action";
+}
+/** The heartbeat's `tidy` (r4): up to 40 suggestions, each a chat id, a title, a destination and a reason. Odd entries are dropped; a new group's name is made valid. */
+function cleanTidy(t) {
+  var k = !!t && typeof t === "object", out = { known: k, at: k ? str(t.at).slice(0, 40) : "", items: [], groups: [] }, seen = Object.create(null);
+  if (!k) return out;
+  (Array.isArray(t.items) ? t.items : []).forEach(function (x) {
+    if (out.items.length >= QA_TIDY_MAX || !x || typeof x !== "object" || !QA_SID_RE.test(str(x.sessionId)) || seen[x.sessionId] || !x.dest || typeof x.dest !== "object") return;
+    var kind = x.dest.kind, dest;
+    if (kind === "group") { if (!QA_GROUP_ID_RE.test(str(x.dest.groupId))) return; dest = { kind: "group", groupId: x.dest.groupId, name: apStr(x.dest.name, 40) || x.dest.groupId }; }
+    else if (kind === "new-group") dest = { kind: "new-group", name: tidyCleanName(x.dest.name) };
+    else if (kind === "archive" || kind === "leave") dest = { kind: kind };
+    else return;
+    seen[x.sessionId] = true;
+    out.items.push({ sessionId: x.sessionId, title: apStr(x.title, 120) || "Untitled session", reason: apStr(x.reason, 160), dest: dest });
+  });
+  (Array.isArray(t.groups) ? t.groups : []).slice(0, 30).forEach(function (g) {
+    if (g && typeof g === "object" && QA_GROUP_ID_RE.test(str(g.id)) && !out.groups.some(function (x) { return x.id === g.id; })) out.groups.push({ id: g.id, name: apStr(g.name, 40) || g.id });
+  });
+  return out;
+}
+/** A new group's name: 1-40 letters, digits, spaces, - _ · (no control characters). */
+function tidyName(s) {
+  var t = str(s).trim();
+  if (!t) return { ok: false, name: "", why: "empty" };
+  if (!QA_GROUP_RE.test(t)) return { ok: false, name: t, why: "Letters, numbers, spaces, - _ · (1–40)" };
+  return { ok: true, name: t, why: "" };
+}
+/** A suggested name from the Mac, made valid: bad characters out, cut at 40, "New group" when nothing is left. */
+function tidyCleanName(s) { var t = str(s).replace(/[^\p{L}\p{N} _·-]/gu, "").replace(/\s+/g, " ").trim().slice(0, 40).trim(); return t || "New group"; }
+/** The Tidy cards from the Mac's suggestions: existing groups, new groups, Archive, then Leave as is (the mock's order). */
+function tidyBuild(items, groups) {
+  var secs = [], by = Object.create(null), uid = 0, rank = { group: 0, "new": 1, arch: 2, leave: 3 };
+  function sec(kind, key, name, groupId) { var s = by[key]; if (!s) { s = by[key] = { id: "s" + (++uid), kind: kind, groupId: groupId || "", name: name, rows: [] }; secs.push(s); } return s; }
+  if ((items || []).length) sec("arch", "arch", "Archive");
+  (items || []).forEach(function (x) {
+    var d = x.dest, s = d.kind === "group" ? sec("group", "g:" + d.groupId, d.name, d.groupId) : d.kind === "new-group" ? sec("new", "n:" + d.name.toLowerCase(), d.name) : d.kind === "archive" ? sec("arch", "arch", "Archive") : sec("leave", "leave", "Leave as is");
+    s.rows.push({ sid: x.sessionId, title: x.title, why: x.reason, on: d.kind !== "leave" });
+  });
+  secs.forEach(function (s, i) { s.i = i; });
+  secs.sort(function (a, b) { return (rank[a.kind] - rank[b.kind]) || (a.i - b.i); });
+  return { secs: secs, uid: uid, extra: (groups || []).slice() };
+}
+function tidyFind(T, sid) { for (var i = 0; i < T.secs.length; i++) for (var j = 0; j < T.secs[i].rows.length; j++) if (T.secs[i].rows[j].sid === sid) return { sec: T.secs[i], row: T.secs[i].rows[j] }; return null; }
+function tidySecById(T, id) { return T.secs.filter(function (s) { return s.id === id; })[0] || null; }
+/** Move a chat to another card (drag or "Move to…"): it is ticked unless the card is Leave as is. false = nothing changed. */
+function tidyMoveRow(T, sid, toId) {
+  var at = tidyFind(T, sid), to = tidySecById(T, toId);
+  if (!at || !to || at.sec === to) return false;
+  at.sec.rows = at.sec.rows.filter(function (r) { return r !== at.row; });
+  to.rows.push(at.row); at.row.why = "Moved by you"; at.row.on = to.kind !== "leave"; T.dirty = true;
+  return true;
+}
+/** Where a chat can be sent from "Move to…": every card shown, plus the Mac's other groups (a card is added when one is chosen). */
+function tidyDestinations(T) {
+  var out = T.secs.map(function (s) { return { secId: s.id, kind: s.kind, name: s.name, groupId: s.groupId }; });
+  (T.extra || []).forEach(function (g) { if (!T.secs.some(function (s) { return s.kind === "group" && s.groupId === g.id; })) out.push({ secId: "", kind: "group", name: g.name, groupId: g.id }); });
+  return out;
+}
+/** Make (or find) the card for a group the Mac listed but no suggestion used, so a chat can be moved there. */
+function tidyEnsureGroup(T, groupId, name) {
+  var s = T.secs.filter(function (x) { return x.kind === "group" && x.groupId === groupId; })[0];
+  if (!s) { s = { id: "s" + (++T.uid), kind: "group", groupId: groupId, name: name, rows: [] }; var at = T.secs.findIndex(function (x) { return x.kind !== "group"; }); T.secs.splice(at < 0 ? T.secs.length : at, 0, s); }
+  return s;
+}
+/** Rename a new group. The same name as another new group merges the two. {ok:false, why} when the name is not allowed (nothing changes). */
+function tidyRename(T, secId, input) {
+  var s = tidySecById(T, secId); if (!s || s.kind !== "new") return { ok: false, why: "not a new group" };
+  if (!str(input).trim()) return { ok: true, name: s.name };
+  var n = tidyName(input); if (!n.ok) return n;
+  var twin = T.secs.filter(function (x) { return x !== s && x.kind === "new" && x.name.toLowerCase() === n.name.toLowerCase(); })[0];
+  if (twin) { twin.rows = twin.rows.concat(s.rows); T.secs = T.secs.filter(function (x) { return x !== s; }); }
+  else s.name = n.name;
+  T.dirty = true; return { ok: true, name: n.name };
+}
+function tidyTick(T, sid) { var at = tidyFind(T, sid); if (!at || at.sec.kind === "leave") return false; at.row.on = !at.row.on; T.dirty = true; return true; }
+/** The numbers in the sticky bar and the confirm sheet (mock): ticked chats going into groups, groups touched, new groups, ticked chats to archive. */
+function tidyCounts(T) {
+  var c = { g: 0, a: 0, gs: 0, ng: 0, names: [] };
+  T.secs.forEach(function (s) {
+    var n = s.rows.filter(function (r) { return r.on; }).length;
+    if (s.kind === "group" || s.kind === "new") { c.g += n; if (n) { c.gs++; if (s.kind === "new") { c.ng++; c.names.push(s.name); } } }
+    if (s.kind === "arch") c.a += n;
+  });
+  return c;
+}
+function tidySumText(c) { return "Group " + c.g + " · Archive " + c.a; }
+/** The mock's confirm sentence; a part with nothing in it is left out. */
+function tidyConfirmText(c) {
+  var parts = [];
+  if (c.g) parts.push("Move " + plural(c.g, "chat", "chats") + " into " + plural(c.gs, "group", "groups") + (c.ng ? ", create " + plural(c.ng, "group", "groups") + " (" + c.names.join(", ") + ")" : ""));
+  if (c.a) parts.push("archive " + plural(c.a, "chat", "chats"));
+  var t = parts.join(", "); return t.charAt(0).toUpperCase() + t.slice(1) + ". Archive never deletes; Undo is on the next screen.";
+}
+/** Exactly the ticked chats, each with the card it sits in now. Leave as is never goes. [] when anything is not valid. */
+function tidyApplyItems(T) {
+  var out = [];
+  T.secs.forEach(function (s) {
+    if (s.kind === "leave") return;
+    s.rows.forEach(function (r) {
+      if (!r.on) return;
+      out.push({ sessionId: r.sid, dest: s.kind === "group" ? { kind: "group", groupId: s.groupId } : s.kind === "new" ? { kind: "new-group", name: s.name } : { kind: "archive" } });
+    });
+  });
+  return out.length <= QA_TIDY_MAX && out.every(function (i) { return tidyDestOk(i.dest); }) ? out : [];
+}
+/** The Mac's answer to tidy-apply (PROTOCOL R4.7.13): the request carries applyId (32 hex) and items [{ sessionId, outcome: "done" | "skipped:<why>" }]. An id written inside the signed result text ("apply <32 hex>") wins over the loose field.
+ *  Falls back to lines "<id> done|skipped:<why>" in the result text. Only chats that were sent are read. -> { applyId, items: { sessionId: { ok, why } }, known } */
+function tidyResult(r, sent) {
+  var out = { applyId: "", items: Object.create(null), known: false }, t = str(r && r.result), ids = (sent || []).map(function (i) { return i.sessionId; });
+  function put(sid, st) { st = str(st).trim(); if (ids.indexOf(sid) < 0 || out.items[sid]) return; if (st === "done") out.items[sid] = { ok: true, why: "" }; else if (/^skipped:/.test(st)) out.items[sid] = { ok: false, why: st.slice(8).trim().slice(0, 80) }; }
+  var m = /apply(?:Id)?[ :=]+([0-9a-f]{32})(?![0-9a-f])/.exec(t);
+  out.applyId = m ? m[1] : ""; // r4.1 (L3): only the id inside the signed result text counts
+  (r && Array.isArray(r.items) ? r.items : []).forEach(function (x) { if (x && typeof x === "object") put(str(x.sessionId), x.outcome !== undefined ? x.outcome : x.status); });
+  var re = /(local_[0-9a-f-]{36})[^\S\n]*[:=\-]*[^\S\n]*(done|skipped:[^\n;,]{1,80})/g, x;
+  while ((x = re.exec(t))) put(x[1], x[2]);
+  out.known = Object.keys(out.items).length > 0;
+  return out;
+}
+/** "Done: 3 moved, 2 archived" (mock), plus the skipped ones named. Without a readable result no counts are claimed. */
+function tidyDoneText(sent, res) {
+  if (!res || !res.known) return "Applied. See Sessions for what changed.";
+  var moved = 0, arch = 0, skip = [];
+  (sent || []).forEach(function (i) { var x = res.items[i.sessionId]; if (!x) return; if (x.ok) { if (i.dest.kind === "archive") arch++; else moved++; } else skip.push(archiveSkipWord(x.why)); });
+  var t = "Done: " + moved + " moved, " + arch + " archived";
+  if (skip.length) t += " · skipped " + skip.length + " (" + skip.slice(0, 2).join(", ") + ")";
+  return t;
+}
+Object.assign(BRIDGE_ERRORS, { // the Mac's own refusal words (PROTOCOL R4.7.2, 7, 12, 13, 14)
+  "bad item": "The Mac refused it: the prompt's ids were not valid.",
+  "away is off": "Away mode is off, so the Mac handles prompts itself.",
+  "no such item": "The Mac no longer has that prompt.",
+  "item expired": "That prompt has expired, so nothing was answered.",
+  "hash mismatch": "The prompt changed on the Mac, so your answer was refused. Look at it again.",
+  "wrong kind": "The Mac refused it: that is not the kind of prompt it answers.",
+  "already answered": "That prompt was already answered.",
+  "bad decision": "The Mac refused it: the answer was not Allow or Deny.",
+  "bad answer": "The Mac refused that answer.",
+  "not an option": "The Mac refused that answer: it is not one of the options.",
+  "bad timeout": "The Mac refused that wait time. Pick 5, 10 or 15 minutes.",
+  "away needs the relay": "Away mode needs the relay connection on the Mac.",
+  "away unavailable": "The Mac cannot store the Away setting.",
+  "keep-awake unavailable": "The Mac cannot keep itself awake from here.",
+  "slow down": "Please wait a minute, then try again.",
+  "bad items": "The Mac refused the list, so nothing changed.",
+  "tidy in progress": "Another Tidy is running on the Mac. Try again in a moment.",
+  "tidy unavailable": "This Mac cannot do Tidy yet.",
+  "bad apply id": "The Mac refused that Undo.",
+  "no such apply": "The Mac no longer has that Tidy to undo (24 hours).",
+  "already undone": "That Tidy was already undone.",
+  "needs a target": "The request had no computer to go to."
+});
+Object.assign(QA_SKIP_WORDS, { "leave": "left as is", "no such group": "the group is gone", "bad group name": "not an allowed group name", "groups unavailable": "groups could not be read", "already there": "already in that group", "not moved": "could not be moved", "not archived": "could not be archived", "archive unverified": "could not be checked", "timed out": "no answer in time", "host session": "the Mac\u2019s own chat", "outside test fence": "outside the test fence", "tool error": "the Mac refused it", "not restored": "could not be restored" });
+/* @pure-end */
 function stats(list) {
   var run = 0, stale = 0, off = 0;
   list.forEach(function (s) { if (s.status === "running") run++; if (s.status === "stale") stale++; if (!s.online) off++; });
@@ -1762,20 +2206,26 @@ async function addPairMac(body, code) {
 }
 async function createRequest(f, opts) {
   if (!S.db) { toast("Not connected to the database."); return false; }
-  if ((f.action === "send" || f.action === "archive" || f.action === "restore") && !SESSION_ID_RE.test(str(f.sessionId))) {
+  if ((f.action === "send" || f.action === "archive" || f.action === "restore" || f.action === "answer") && !SESSION_ID_RE.test(str(f.sessionId))) {
     toast("That session id looks wrong, so nothing was sent."); return false;
   }
   if ((f.action === "agent-run" || f.action === "agent-toggle" || f.action === "agent-delete") && !SLUG_RE.test(str(f.agentId))) { toast("That agent id looks wrong, so nothing was sent."); return false; }
   if (f.action === "agent-save" && !(f.agent && SLUG_RE.test(str(f.agent.id)))) { toast("That agent id looks wrong, so nothing was sent."); return false; }
   if (f.action === "research-now" && (!str(f.question).trim() || str(f.question).length > 1000 || !f.target)) { toast("That research request is incomplete, so nothing was sent."); return false; }
-  if (f.action === "start" && (!str(f.title).trim() || !str(f.prompt).trim() || !f.target)) { toast("That start request is incomplete, so nothing was sent."); return false; }
+  var fixedStart = f.action === "start" && (f.kind === "command" || f.kind === "saved"); // r3: no title or prompt to check: the Mac holds both
+  if (fixedStart && (!f.target || (f.kind === "command" ? !QA_COMMANDS.some(function (c) { return c.cmd === f.command && c.cmd !== "gn"; }) : !/^[a-z0-9-]{1,40}$/.test(str(f.savedId))))) { toast("That start request is incomplete, so nothing was sent."); return false; }
+  if (f.action === "start" && !fixedStart && (!str(f.title).trim() || !str(f.prompt).trim() || !f.target)) { toast("That start request is incomplete, so nothing was sent."); return false; }
+  if (f.action === "answer" && (!str(f.text).trim() || str(f.text).length > 4000)) { toast("That answer is empty or too long, so nothing was sent."); return false; }
+  if (f.action === "reload-config" && !f.target) { toast("No computer to reload, so nothing was sent."); return false; }
+  if (R4_ACTIONS.indexOf(f.action) >= 0 && r4Invalid(f)) { toast("That request looks wrong, so nothing was sent."); return false; }
   opts = Object.assign({}, opts, { sent: {} });
   var id = opts.id || newId(); // a retry keeps its id: the bridge's ledger stops one id from running twice
   var body = opts.body || requestBody(f, id, new Date().toISOString());
-  try { await writeRequest(body, opts); watchReq(id, f); return id; }
+  var watch = function () { if (!opts.noWatch) watchReq(id, f); }; // the Quick actions sheet follows its own requests (checkQuick)
+  try { await writeRequest(body, opts); watch(); return id; }
   catch (e) {
     var isPair = f.action === "pair", msg = e && e.message;
-    if (!isPair && e && e.exists) watchReq(id, f);
+    if (!isPair && e && e.exists) watch();
     if (!isPair && e && e.exists) return id; // the relay already has this id: it arrived (success, pending the Mac)
     if (!isPair && e && e.lost) { // no ack: the write may have landed. Not a failure; check, then offer a retry with the same id
       S.unknown[id] = { id: id, f: f, body: body, signed: opts.sent.b || null, at: Date.now(), asked: false };
@@ -1877,7 +2327,7 @@ function render(force) {
   document.body.classList.toggle("dock", wide && !!S.focus);
   renderHeader(model); renderTabbar(model);
   var tabSig = S.tab === "today" ? todayKey(model) : S.tab === "saves" ? savesKey() : S.tab === "activity" ? activityKey(model) : S.tab === "assistant" ? assistantKey(model) : S.tab === "autopilot" ? autopilotKey(model) : "";
-  var sig = JSON.stringify([model.sig, S.dbState, S.dbError, S.tab, S.view, S.group, S.sub, S.sel, S.list, S.filter, S.query, S.more, S.busy, Object.keys(S.unknown).map(function (k) { return k + S.unknown[k].asked; }).join(), homeScreenNeeded(), S.reqLoaded, archivedList().length, window.innerWidth < 600, wide, wide && !!S.focus, waitIds(), Object.keys(S.unreadMap).sort().join(","), Object.keys(S.pins).sort().join(","), S.hint, DEV.state, JSON.stringify(DEV.paired), needsPairing(model), Object.keys(S.sig).map(function (k) { return k + docVerdict(k); }).join(), tabSig]);
+  var sig = JSON.stringify([model.sig, S.dbState, S.dbError, S.tab, S.view, S.group, S.sub, S.sel, S.list, S.filter, S.query, S.more, S.busy, Object.keys(S.unknown).map(function (k) { return k + S.unknown[k].asked; }).join(), homeScreenNeeded(), S.reqLoaded, archivedList().length, window.innerWidth < 600, wide, wide && !!S.focus, waitIds(), Object.keys(S.unreadMap).sort().join(","), Object.keys(S.pins).sort().join(","), S.hint, DEV.state, JSON.stringify(DEV.paired), needsPairing(model), Object.keys(S.sig).map(function (k) { return k + docVerdict(k); }).join(), tabSig, quickSig()]);
   if (force || sig !== S.lastSig) {
     S.lastSig = sig;
     var ae = document.activeElement, key = ae && ae.getAttribute && ae.getAttribute("data-k");
@@ -1894,6 +2344,7 @@ function render(force) {
   renderDialog();
   renderMenu();
   renderFocus();
+  renderQuick();
   renderQueue();
 }
 /** Ids whose newest message asks you something (heartbeat `waiting`, or a fresh peek): they show as "Needs you". */
@@ -2222,6 +2673,7 @@ function todayKey(model) {
 function secHead(title, right) { return h("div", { "class": "sh" }, h("h2", { text: title }), right || null); }
 function todayNode(model) {
   var d = S.todayData || todayData(model), p = d.pick, f = document.createDocumentFragment();
+  f.appendChild(quickBanner()); // r3: "N chats waiting on you" opens Quick actions
   if (d.catchUp) f.appendChild(h("div", { "class": "catchup", role: "status" }, h("span", { text: d.catchUp }), h("button", { "class": "btn tx", type: "button", "aria-label": "Dismiss summary", onclick: function () { S.awaySince = 0; render(true); }, text: "\u2715" })));
   f.appendChild(secHead("Needs you", p.needs.length ? h("span", { "class": "cap", text: (p.needs.length + p.needsMore) + " waiting" }) : null));
   if (p.needs.length) {
@@ -2427,9 +2879,10 @@ function reqState(id) {
   return !r ? { st: "sending" } : r.status === "done" ? { st: "done", r: r } : r.status === "error" ? { st: "error", r: r } : { st: r.status === "claimed" ? "working" : "sending", r: r };
 }
 function checkReqWatch() {
+  checkQuick();
   Object.keys(S.reqWatch).forEach(function (id) {
     var w = S.reqWatch[id], x = reqState(id), a = w.f.action;
-    if (x.st === "done") { delete S.reqWatch[id]; toast(REQ_DONE[a] || "Done."); render(true); }
+    if (x.st === "done") { delete S.reqWatch[id]; toast(w.f.doneMsg || REQ_DONE[a] || "Done."); render(true); }
     else if (x.st === "error") {
       delete S.reqWatch[id];
       toast(REQ_LABEL[a] + " failed: " + friendlyError(a, x.r.error || x.r.result || "unknown error"), { action: { label: "Retry", fn: function () { createRequest(w.f); } } });
@@ -3260,7 +3713,7 @@ function apDetail(d) {
 
 /* ---------- Saves and Activity tabs ---------- */
 var STATUS_LABEL = Object.assign(Object.create(null), { "new": "New", claimed: "Claimed", done: "Done", error: "Error", unverified: "Unverified", unknown: "Unknown \u2014 check" });
-var ACTION_LABEL = Object.assign(Object.create(null), { send: "Reply", archive: "Archive", list: "Refresh", peek: "Peek", start: "Start session", restore: "Restore", "agent-save": "Save agent", "agent-run": "Run agent", "agent-toggle": "Agent on/off", "research-now": "Research", pair: "Pair device", unpair: "Remove device" });
+var ACTION_LABEL = Object.assign(Object.create(null), { send: "Reply", archive: "Archive", list: "Refresh", peek: "Peek", start: "Start session", restore: "Restore", "agent-save": "Save agent", "agent-run": "Run agent", "agent-toggle": "Agent on/off", "research-now": "Research", pair: "Pair device", unpair: "Remove device", "away-set": "Away mode", "perm-answer": "Permission answer", "q-answer": "Question answer", "keep-awake": "Keep awake", "tidy-refresh": "Tidy refresh", "tidy-apply": "Tidy", "tidy-undo": "Undo Tidy" });
 function focusables(root) { return Array.prototype.slice.call(root.querySelectorAll('a[href],button:not([disabled]),input:not([disabled]),select,textarea,[tabindex="0"]')); }
 /** Keep Tab inside a sheet: wraps last -> first and first (or the title) -> last. */
 function trapTab(e, root) {
@@ -3732,6 +4185,605 @@ function renderFocus() {
 }
 
 /* ---------- confirm dialog (also the Quick guide and the usage sheet: info = one Close button) ---------- */
+/* @quick-ui-start */
+/* ---------- r3 Quick actions: the ⚡ button, the Today banner and the sheet (Waiting / Run / Archive / Mac). Mock: mockups-quick-actions/mock.html v2.
+   Every change goes through a confirm sheet, then one signed request (createRequest); the Mac decides. There is no Allow/Deny, no Stop and no delete here. ---------- */
+/** The Mac's pending items (every verified computer) and the Away setting of the computer r4 requests go to. */
+function quickR4() {
+  var m = S.model ? S.model.mstat : null, gate = m ? quickGate(m) : { ok: false, target: "" }, pending = [];
+  NAMES.forEach(function (n) { var x = m && m[n]; if (!x || !x.exists || x.verified === false) return; (x.pending || []).forEach(function (p) { pending.push(Object.assign({}, p, { machine: n, online: !!x.online })); }); });
+  var name = gate.ok ? gate.target : NAMES.filter(function (n) { return m && m[n] && m[n].exists && m[n].verified !== false; })[0], tm = m && name ? m[name] : null; // offline: the last Away setting the Mac published
+  return { pending: pending, away: tm && tm.away ? tm.away : cleanAway(null) };
+}
+function quickCardsNow() { return quickCards(S.byId, S.needsMap, S.qa.done, Date.now(), quickR4()); }
+function quickGnIds() { return NAMES.map(function (n) { var g = cleanGn(S.gn[n]); return g ? g.sessionId : ""; }).filter(Boolean); }
+function quickCandidates() { return archiveCandidates(S.byId, { needs: S.needsMap, assistantId: S.assistInfo ? S.assistInfo.id : "", gnIds: quickGnIds(), pins: S.pins }).filter(function (c) { return !archiveBlock(S.byId[c.id]); }); }
+function quickSig() { var c = quickCardsNow(); return quickCount(c) + ":" + c.map(function (x) { return x.id + x.kind + (x.done ? 1 : 0); }).join(","); }
+function openQuick(seg) {
+  S.menuOpen = false; renderMenu();
+  if (!S.qa.open) S.qa.opener = document.activeElement;
+  S.qa.open = true; if (seg) S.qa.seg = seg;
+  renderQuick();
+}
+function closeQuick() {
+  if (!S.qa.open) return;
+  var op = S.qa.opener; S.qa.open = false; S.qa.opener = null; tidyDragClear(); if (S.qa.tidy) S.qa.tidy.done = null;
+  renderQuick();
+  var back = op && op.isConnected && !op.disabled && op !== document.body ? op : $("quickBtn");
+  if (back && back.focus) back.focus();
+}
+/** The ⚡ button in the top bar (every tab): the badge is the number of chats waiting on you. */
+function renderQuickBtn() {
+  var b = $("quickBtn"); if (!b) return;
+  var n = quickCount(quickCardsNow()), key = String(n) + "|" + S.qa.open;
+  if (b.getAttribute("data-key") === key) return;
+  b.setAttribute("data-key", key); clear(b);
+  b.setAttribute("aria-label", quickAria(n)); b.setAttribute("aria-expanded", String(!!S.qa.open));
+  b.appendChild(h("span", { "aria-hidden": "true", text: "⚡" }));
+  if (n) b.appendChild(h("span", { "class": "qbadge", "aria-hidden": "true", text: n > 99 ? "99+" : String(n) }));
+}
+/** Today's banner: "3 chats waiting on you" opens the Waiting segment. */
+function quickBanner() {
+  var n = quickCount(quickCardsNow());
+  return h("button", { "class": "qbanner" + (n ? "" : " zero"), type: "button", "data-k": "qbanner", onclick: function () { openQuick("wait"); } },
+    h("span", { "class": "qdot", "aria-hidden": "true" }), h("span", { "class": "qgrow", text: quickBannerText(n) }), h("span", { "aria-hidden": "true", text: "›" }));
+}
+/** A confirm sheet (the mock's bottom sheet): Cancel + one action. Nothing is sent before the action is tapped. */
+function quickAsk(cp, ok, danger) {
+  S.ask = { title: cp.title, body: cp.body, okLabel: cp.ok, sheet: true, primary: !danger, danger: !!danger, ok: ok };
+  renderDialog();
+}
+function quickDoneLine(msg) { return h("div", { "class": "qdone", role: "status", text: "✓ " + msg }); }
+function qaSel(id) { var m = S.qa.qsel || (S.qa.qsel = Object.create(null)); return m[id] || (m[id] = { picks: [], other: "", openOther: false }); }
+/** "Away mode is off: this prompt is waiting on the Mac." + "Turn on Away mode" (opens the Mac segment). Without Away mode on the phone cannot answer; there is nothing else to press. */
+function quickWaitsOnMac(card, c) {
+  card.appendChild(h("div", { "class": "qmuted", style: "margin-top:6px", text: c.awayOn ? "This prompt is waiting on the Mac." : "Away mode is off: this prompt is waiting on the Mac." }));
+  if (!c.awayOn && c.awayKnown) card.appendChild(h("button", { "class": "qlinkb", type: "button", "data-k": "qturnon-" + c.id, onclick: function () { S.qa.seg = "mac"; renderQuick(); }, text: "Turn on Away mode" }));
+}
+/** One Waiting card. Question: its own options (or free text); your turn: reply; permission: the exact command with Deny / Allow once. Stuck chat: waits on the Mac. */
+function quickCardNode(c, gate) {
+  if (c.kind === "pq" || c.kind === "pp") return quickPendCard(c, gate);
+  var pend = S.qa.pend[c.id], head = h("div", { "class": "qttl" }, h("span", { "class": "qdot", "aria-hidden": "true" }), h("span", { "class": "qgrow", text: c.title }),
+    c.done ? null : h("span", { "class": "qkind", text: c.kind === "question" ? "Question" : c.kind === "turn" ? "Your turn" : "Permission" }));
+  var card = h("div", { "class": "qwait", "data-qid": c.id }, head);
+  if (c.done) { card.appendChild(quickDoneLine(c.done)); return card; }
+  if (c.kind === "stuck") { quickWaitsOnMac(card, c); return card; }
+  var isQ = c.kind === "question", off = !c.online || !!pend || (isQ && !gate.ok) || !!(S.model && S.model.mstat[c.machine] && S.model.mstat[c.machine].youPaired === false);
+  if (isQ) {
+    card.appendChild(h("div", { "class": "qq", text: "Claude asked you a question." }));
+    card.appendChild(h("div", { "class": "qmuted", text: "The question and its options aren't visible from the phone. Type your answer here, or answer it at the Mac." }));
+  } else if (c.ask) card.appendChild(h("div", { "class": "qq", text: "“" + c.ask + "”" }));
+  var btn = h("button", { "class": "qbtn2", type: "button", "data-k": "qsend-" + c.id, disabled: off || !str(S.qa.drafts[c.id]).trim() ? "" : null, text: pend ? "Sending…" : isQ ? "Answer here" : "Send reply" });
+  var inp = h("input", { "class": "qinp", type: "text", "data-k": "qin-" + c.id, maxlength: 4000, enterkeyhint: "send", autocomplete: "off", placeholder: isQ ? "Type your answer…" : "Reply to this chat…", "aria-label": (isQ ? "Your answer to " : "Your reply to ") + c.title, value: S.qa.drafts[c.id] || "", disabled: off ? "" : null });
+  function go() { var t = str(inp.value).trim(); if (!t || off) return; if (isQ) quickAnswer(c, t); else quickReply(c, t); }
+  inp.addEventListener("input", function () { S.qa.drafts[c.id] = inp.value; btn.disabled = off || !str(inp.value).trim(); });
+  inp.addEventListener("keydown", function (e) { if (e.key === "Enter") { e.preventDefault(); if (!e.repeat) go(); } });
+  btn.addEventListener("click", go);
+  card.appendChild(inp); card.appendChild(h("div", { "class": "qrow" }, btn));
+  if (isQ && !gate.ok) card.appendChild(h("div", { "class": "qmuted", text: "Answering from here is off: " + gate.reason + "." }));
+  else if (!c.online) card.appendChild(h("div", { "class": "qmuted", text: c.machine + " is offline." }));
+  return card;
+}
+/** A pending item from the Mac (Away mode). Everything shown is the Mac's text, set with textContent only. */
+function quickPendCard(c, gate) {
+  var it = c.item, pend = S.qa.pend[c.id], isQ = c.kind === "pq";
+  var head = h("div", { "class": "qttl" }, h("span", { "class": "qdot", "aria-hidden": "true" }), h("span", { "class": "qgrow", text: c.title }), c.done ? null : h("span", { "class": "qkind", text: isQ ? "Question" : "Permission" }));
+  var card = h("div", { "class": "qwait", "data-qid": c.id }, head);
+  if (c.done) { card.appendChild(quickDoneLine(c.done)); return card; }
+  if (!c.awayOn) { quickWaitsOnMac(card, c); return card; }
+  var off = !c.online || !!pend || !gate.ok;
+  if (isQ) {
+    var sel = qaSel(c.id);
+    card.appendChild(h("div", { "class": "qq", text: c.ask || "Claude asked you a question." }));
+    var opts = h("div", { "class": "qopts", role: "group", "aria-label": "Answers" });
+    it.options.forEach(function (o, i) {
+      var on = sel.picks.indexOf(o.label) >= 0;
+      opts.appendChild(h("button", { "class": "qopt" + (on ? " on" : ""), type: "button", "aria-pressed": String(on), "data-k": "qopt-" + c.id + "-" + i, disabled: off ? "" : null,
+        onclick: function () { quickPick(c, o.label); } }, h("b", { text: o.label }), o.description ? h("span", { text: o.description }) : null));
+    });
+    card.appendChild(opts);
+    card.appendChild(h("button", { "class": "qlinkb", type: "button", "data-k": "qother-" + c.id, disabled: off ? "" : null, "aria-expanded": String(!!sel.openOther), onclick: function () { sel.openOther = !sel.openOther; if (sel.openOther) sel.picks = []; else sel.other = ""; renderQuick(); }, text: "Other\u2026" }));
+    var send = h("button", { "class": "qbtn2", type: "button", "data-k": "qqsend-" + c.id, text: pend ? "Sending…" : "Send answer" });
+    function ready() { return !off && !!qAnswerFields(it, sel.picks, sel.openOther ? sel.other : ""); }
+    send.disabled = !ready();
+    if (sel.openOther) {
+      var oi = h("input", { "class": "qinp", type: "text", "data-k": "qoin-" + c.id, maxlength: QA_ANSWER_MAX, autocomplete: "off", placeholder: "Type your answer…", "aria-label": "Your own answer to " + c.title, value: sel.other, disabled: off ? "" : null });
+      oi.addEventListener("input", function () { sel.other = oi.value; send.disabled = !ready(); });
+      oi.addEventListener("keydown", function (e) { if (e.key === "Enter") { e.preventDefault(); if (!e.repeat && ready()) quickQSend(c); } });
+      card.appendChild(oi);
+    }
+    send.addEventListener("click", function () { if (ready()) quickQSend(c); });
+    card.appendChild(h("div", { "class": "qrow" }, send));
+  } else {
+    card.appendChild(h("div", { "class": "qq", text: permLead(it) }));
+    card.appendChild(h("div", { "class": "qcode", "data-k": "qcmd-" + c.id, text: it.summary || "(the Mac sent no details)" }));
+    if (it.clipped) card.appendChild(h("div", { "class": "qmuted", "data-k": "qclip-" + c.id, style: "margin-top:6px", text: "(shortened \u2014 full text on the Mac)" }));
+    card.appendChild(h("div", { "class": "qmuted", style: "margin-top:6px", text: permAgeText(it, S.now || Date.now()) }));
+    var can = it.approvable === true && !!it.summary;
+    if (it.approvable !== true) card.appendChild(h("div", { "class": "qmuted", "data-k": "qmaconly-" + c.id, style: "margin-top:6px", text: "Needs you at the Mac \u00b7 " + (it.why === "mac-only" ? "touches Mac-only files" : it.why === "too-long" ? "too long to check on the phone" : "can't be checked on the phone") }));
+    var row = h("div", { "class": "qrow" }, h("button", { "class": "qbtn2 sec", type: "button", "data-k": "qdeny-" + c.id, disabled: off ? "" : null, onclick: function () { quickPerm(c, "deny"); }, text: pend ? "Sending…" : "Deny" }));
+    if (can) row.appendChild(h("button", { "class": "qbtn2", type: "button", "data-k": "qallow-" + c.id, disabled: off ? "" : null, onclick: function () { quickPerm(c, "allow"); }, text: "Allow once" }));
+    else if (it.approvable === true) card.appendChild(h("div", { "class": "qmuted", text: "Without the command there is nothing to allow. Deny it, or answer at the Mac." }));
+    card.appendChild(row);
+  }
+  if (!c.online) card.appendChild(h("div", { "class": "qmuted", text: c.machine + " is offline." }));
+  else if (!gate.ok) card.appendChild(h("div", { "class": "qmuted", text: "Answering from here is off: " + gate.reason + "." }));
+  return card;
+}
+/** Tap an option: one answer replaces the last (and clears "Other"); with multiSelect it toggles, up to 4 in all. */
+function quickPick(c, label) {
+  var sel = qaSel(c.id), it = c.item, i = sel.picks.indexOf(label);
+  if (!it.multiSelect) sel.picks = [label];
+  else if (i >= 0) sel.picks.splice(i, 1);
+  else if (sel.picks.length < QA_MULTI_MAX) sel.picks.push(label);
+  else { toast("At most " + QA_MULTI_MAX + " answers."); renderQuick(); return; }
+  sel.other = ""; sel.openOther = false; // an option and Other never go together
+  renderQuick();
+}
+/** One signed request for a pending item; the card turns to its green line only when the Mac says done. */
+function quickSendPend(c, f, msg, fail) {
+  if (!f || S.qa.pend[c.id]) return;
+  S.qa.pend[c.id] = { rid: "", kind: c.item.kind, at: Date.now(), msg: msg, fail: fail, title: c.title }; // taken at once: a double tap sends once
+  createRequest(f, { noWatch: true }).then(function (rid) {
+    if (!rid) { delete S.qa.pend[c.id]; renderQuick(); return; }
+    if (S.qa.pend[c.id]) S.qa.pend[c.id].rid = rid; renderQuick();
+  });
+  renderQuick();
+}
+function quickQSend(c) {
+  var sel = qaSel(c.id);
+  quickSendPend(c, qAnswerFields(c.item, sel.picks, sel.openOther ? sel.other : ""), "Answer sent", "Answer not sent");
+}
+/** Deny goes straight away. Allow once asks first, and only if the prompt is still the one that was on the screen (same id AND same hash). */
+function quickPerm(c, decision) {
+  if (decision === "deny") { quickSendPend(c, permFields(c.item, "deny"), "Denied", "Not denied"); return; }
+  quickAsk(quickConfirm("allow", { title: c.title }), function () {
+    var now = quickCardsNow().filter(function (x) { return x.id === c.id && x.item; })[0];
+    if (!now || now.item.inputHash !== c.item.inputHash) { toast("That prompt changed or is gone, so nothing was allowed. Look at it again."); renderQuick(); return; }
+    quickSendPend(c, permFields(c.item, "allow"), "Allowed once", "Not allowed");
+  });
+}
+/** Answer here: stop the question, then send the text (one signed `answer` request). The card turns green only when the Mac says it is done. */
+function quickAnswer(c, t) {
+  quickAsk(quickConfirm("ans", { title: c.title }), function () {
+    createRequest(answerFields(c.id, t, S.machines), { noWatch: true }).then(function (rid) {
+      if (!rid) return;
+      S.qa.pend[c.id] = { rid: rid, kind: "question", at: Date.now(), msg: "Answer sent to the Mac chat", fail: "Answer not sent" }; renderQuick();
+    });
+  });
+}
+function quickReply(c, t) {
+  // fix round 1: no confirm sheet here, as in the mock: a reply is the chat's next message and stops nothing ("Answer here" keeps its confirm: it stops the chat)
+  if (S.qa.pend[c.id]) return;
+  S.qa.pend[c.id] = { rid: "", kind: "turn", at: Date.now(), msg: "Reply sent to the Mac chat", fail: "Reply not sent" }; // taken at once: a double tap sends one reply
+  createRequest(sendFields(c.id, t, S.machines), { noWatch: true }).then(function (rid) {
+    if (!rid) { delete S.qa.pend[c.id]; renderQuick(); return; }
+    S.qa.pend[c.id].rid = rid; renderQuick();
+  });
+  renderQuick();
+}
+/** A Run tile: confirm, then one signed start. The request names the command (or the saved prompt's id) only. */
+function quickRun(name, desc, fields) {
+  if (!fields) return;
+  quickAsk(quickConfirm("run", { name: name, desc: desc }), function () {
+    fields.doneMsg = "Started " + name + " · see Sessions";
+    createRequest(fields).then(function (rid) { if (rid) toast("Asked the Mac to start " + name + "…"); });
+  });
+}
+function quickArchive(ids) {
+  if (!ids.length || S.qa.arch) return;
+  quickAsk(quickConfirm("arch", { n: ids.length }), async function () {
+    var a = { ids: ids.slice(), rids: Object.create(null), targets: Object.create(null), at: Date.now() };
+    S.qa.arch = a; renderQuick();
+    for (var i = 0; i < ids.length; i++) {
+      var id = ids[i], sx = S.byId[id];
+      if (!sx || archiveBlock(sx)) continue; // left the list, or started running, since it was ticked: never sent
+      a.targets[id] = sx.machine;
+      var rid = await createRequest(archiveFields(id, S.machines), { noWatch: true });
+      if (rid) a.rids[id] = rid;
+    }
+    a.sent = true; S.qa.sel = Object.create(null); checkQuick(); renderQuick();
+  }, true);
+}
+/** Undo of a bulk archive: one signed `restore` per archived chat. */
+async function quickUndo(ids, targets) {
+  var n = 0;
+  for (var i = 0; i < ids.length; i++) { var rid = await createRequest(restoreFields(ids[i], targets[ids[i]]), { noWatch: true }); if (rid) n++; }
+  toast(n ? "Restore requested for " + plural(n, "chat", "chats") + ". See Activity." : "Nothing restored.");
+}
+function quickReload(target) {
+  quickAsk(quickConfirm("reload"), function () {
+    createRequest(reloadFields(target), { noWatch: true }).then(function (rid) {
+      if (!rid) return;
+      S.qa.reloadReq = { rid: rid, at: Date.now() }; S.qa.reload = null; renderQuick();
+    });
+  });
+}
+/** Follow the requests this sheet sent: a card turns to its green line only on the Mac's "done"; a refusal is said in plain words. */
+function checkQuick() {
+  var now = Date.now(), changed = false;
+  Object.keys(S.qa.pend).forEach(function (id) {
+    var p = S.qa.pend[id]; if (!p.rid) return; // still being written
+    var x = reqState(p.rid);
+    if (x.st === "done") { delete S.qa.pend[id]; S.qa.done[id] = { msg: p.msg, kind: p.kind, at: now, title: p.title }; S.qa.drafts[id] = ""; if (S.qa.qsel) delete S.qa.qsel[id]; toast(p.msg); changed = true; }
+    else if (x.st === "error") { delete S.qa.pend[id]; toast(p.fail + ": " + friendlyError(x.r.action, x.r.error || "unknown error")); changed = true; }
+    else if (now - p.at > 300000) { delete S.qa.pend[id]; toast(p.fail + ": no answer from your Mac in 5 min. Is it awake?"); changed = true; }
+  });
+  Object.keys(S.qa.done).forEach(function (id) { if (now - S.qa.done[id].at >= QA_DONE_MS) { delete S.qa.done[id]; changed = true; } });
+  var a = S.qa.arch;
+  if (a && a.sent) {
+    var o = archiveOutcome(a.ids, a.rids, S.requests);
+    if (!o.pending || now - a.at > QA_ARCHIVE_WAIT_MS) {
+      S.qa.arch = null; changed = true;
+      var targets = Object.assign({}, a.targets), done = o.done.concat(o.kids); // a child is restored on its parent's computer
+      o.kids.forEach(function (k) { targets[k] = a.targets[o.kidOf[k]]; });
+      toast(archiveToastText(o), done.length ? { undo: function () { quickUndo(done, targets); } } : undefined);
+    }
+  }
+  if (checkQuickR4(now)) changed = true;
+  var r = S.qa.reloadReq;
+  if (r) {
+    var y = reqState(r.rid);
+    if (y.st === "done" || y.st === "error") { S.qa.reloadReq = null; S.qa.reload = reloadText(y.r); toast(S.qa.reload.ok ? "Settings reloaded" : S.qa.reload.text); changed = true; }
+    else if (now - r.at > 120000) { S.qa.reloadReq = null; S.qa.reload = { ok: false, text: "No answer from your Mac. Is it awake?" }; changed = true; }
+  }
+  if (changed) { renderQuickBtn(); renderQuick(); }
+}
+/** Follow the r4 requests this sheet sent (Away mode, Keep awake, Tidy apply / refresh / undo). true = something changed on screen. */
+function checkQuickR4(now) {
+  var changed = false, T = S.qa.tidy;
+  function end(req, ok, fail, onDone) {
+    var x = reqState(req.rid);
+    if (x.st === "done") { onDone(x.r); return true; }
+    if (x.st === "error") { toast(fail + ": " + friendlyError(x.r.action, x.r.error || "unknown error")); return true; }
+    if (now - req.at > 300000) { toast(fail + ": no answer from your Mac in 5 min. Is it awake?"); return true; }
+    return false;
+  }
+  if (S.qa.awayReq && end(S.qa.awayReq, "", "Away mode not changed", function () { toast(S.qa.awayReq.on ? "Away mode on" : "Away mode off"); })) { S.qa.awayReq = null; changed = true; }
+  if (S.qa.keepReq && end(S.qa.keepReq, "", "Keep awake not changed", function () { toast(S.qa.keepReq.on ? "Mac kept awake" : "Mac may sleep again"); })) { S.qa.keepReq = null; changed = true; }
+  if (T && T.apply && T.apply.rid) {
+    var ap = T.apply;
+    if (end(ap, "", "Tidy not applied", function (r) {
+      var res = tidyResult(r, ap.items);
+      T.done = { msg: tidyDoneText(ap.items, res), applyId: res.applyId, target: ap.target };
+      T.secs.forEach(function (sx) { sx.rows = sx.rows.filter(function (row) { return !(res.items[row.sid] && res.items[row.sid].ok); }); });
+      T.dirty = false; // the next suggestions the Mac sends are taken
+      toast(res.applyId ? "Tidied" : "Applied", res.applyId ? { undo: function () { quickTidyUndo(ap.target || ""); } } : undefined);
+    })) { T.apply = null; changed = true; }
+  }
+  if (T && T.refreshReq && end(T.refreshReq, "", "No fresh suggestions", function () {})) { T.refreshReq = null; if (!T.secs || !T.dirty) T.fresh = false; changed = true; }
+  if (T && T.undoReq && end(T.undoReq, "", "Tidy not undone", function () { T.done = null; T.at = ""; T.secs = null; T.dirty = false; toast("Undone"); })) { T.undoReq = null; changed = true; }
+  return changed;
+}
+function quickWaitPane(cards, gate) {
+  var f = h("div", { "class": "qpane", id: "qp-wait", role: "tabpanel" }), secs = [["q", "Question"], ["turn", "Waiting on you"], ["perm", "Permission"]];
+  if (!cards.length) { f.appendChild(h("div", { "class": "qempty" }, icon("check", 32), h("div", { "class": "big", text: "Nothing waiting on you" }), h("div", { "class": "qmuted", text: "Questions, replies you owe and prompts show here." }))); return f; }
+  secs.forEach(function (sx) {
+    var list = cards.filter(function (c) { return c.sec === sx[0]; });
+    if (!list.length) return;
+    f.appendChild(h("div", { "class": "qsec", text: sx[1] }));
+    list.forEach(function (c) { f.appendChild(quickCardNode(c, gate)); });
+  });
+  return f;
+}
+function quickRunPane(gate, m) {
+  var f = h("div", { "class": "qpane", id: "qp-run", role: "tabpanel" }), sg = startGate(m), saved = gate.ok && m[gate.target] ? m[gate.target].saved : [];
+  f.appendChild(h("div", { "class": "qmuted qlead", text: "Each tile starts a fresh chat on the Mac. You confirm first." }));
+  var tiles = h("div", { "class": "qtiles" });
+  QA_COMMANDS.forEach(function (c) {
+    var isGn = c.cmd === "gn", ok = sg.ok && (isGn || gate.ok), target = isGn ? sg.target : gate.target;
+    tiles.appendChild(h("button", { "class": "qtile", type: "button", "data-k": "qrun-" + c.cmd, disabled: ok ? null : "", onclick: function () { quickRun(c.name, c.desc, commandFields(c.cmd, target)); } }, h("b", { text: c.name }), h("span", { text: c.sub })));
+  });
+  f.appendChild(tiles);
+  if (!sg.ok) f.appendChild(h("div", { "class": "qmuted qlead", text: "Starting from the phone is off: " + sg.reason + "." }));
+  else if (!gate.ok) f.appendChild(h("div", { "class": "qmuted qlead", text: "Only /gn works until the Mac bridge is updated (" + gate.reason + ")." }));
+  f.appendChild(h("div", { "class": "qsec", text: "Saved prompts" }));
+  if (saved.length) {
+    var st = h("div", { "class": "qtiles" });
+    saved.forEach(function (p) {
+      st.appendChild(h("button", { "class": "qtile", type: "button", "data-k": "qsaved-" + p.id, disabled: sg.ok && gate.ok ? null : "", onclick: function () { quickRun("Saved: " + p.title, p.desc || "Runs the saved prompt “" + p.title + "” from the Mac’s list.", savedFields(p.id, gate.target)); } }, h("b", { text: p.title }), h("span", { text: p.desc })));
+    });
+    f.appendChild(st);
+  } else f.appendChild(h("div", { "class": "qmuted", text: "No saved prompts on the Mac yet." }));
+  f.appendChild(h("div", { "class": "qmuted qfoot", text: "Saved prompts come from the Mac's list. Add or edit them at the Mac (keeps the list on the trusted side)." }));
+  return f;
+}
+/* The old Archive pane (r3). Replaced in the sheet by Tidy (r4, mock v4); kept only because its pure rules and tests still stand. */
+function quickArchivePane() {
+  var f = h("div", { "class": "qpane", id: "qp-tidy", role: "tabpanel" }), cands = quickCandidates(), ids = cands.map(function (c) { return c.id; }), busy = !!S.qa.arch;
+  var picked = tickedIds(S.qa.sel, cands), n = picked.length;
+  f.appendChild(h("div", { "class": "qmuted qlead", text: "Done or stale chats. Archive only, never delete. Each is re-checked on the Mac before it's archived; a chat that started running again is skipped." }));
+  if (!cands.length) { f.appendChild(h("div", { "class": "qempty" }, h("div", { "class": "big", text: "Nothing to archive" }), h("div", { "class": "qmuted", text: "Done and stale chats show here." }))); }
+  else {
+    f.appendChild(h("div", { "class": "qrow qall" }, h("button", { "class": "qlink", type: "button", "data-k": "qall", disabled: busy ? "" : null, onclick: function () { S.qa.sel = tickAll(S.qa.sel, ids, QA_MAX_TICK); renderQuick(); }, text: "Select all" }), ids.length > QA_MAX_TICK ? h("span", { "class": "qmuted", text: QA_MAX_TICK + " at a time" }) : null));
+    var list = h("div", { "class": "qlist", role: "group", "aria-label": "Chats to archive" });
+    cands.forEach(function (c) {
+      var on = !!S.qa.sel[c.id];
+      list.appendChild(h("button", { "class": "qli" + (on ? " on" : ""), type: "button", role: "checkbox", "aria-checked": String(on), "data-k": "qli-" + c.id, disabled: busy ? "" : null,
+        onclick: function () { var r = tickToggle(S.qa.sel, c.id, QA_MAX_TICK); S.qa.sel = r.sel; if (r.full) toast(QA_MAX_TICK + " chats at most at a time."); renderQuick(); } },
+        h("span", { "class": "qbox", "aria-hidden": "true", text: "✓" }), h("span", { "class": "qtt" }, h("b", { text: c.title }), h("span", { "class": "qmuted", text: archiveMeta(c) }))));
+    });
+    f.appendChild(list);
+  }
+  f.appendChild(h("div", { "class": "qmuted qfoot", text: "Not listed: running chats, pinned chats, /gn runs, and parent chats with a child still waiting." }));
+  f.appendChild(h("div", { "class": "qsticky" }, h("button", { "class": "qbtn2 danger", type: "button", "data-k": "qarch", disabled: !n || busy ? "" : null, onclick: function () { quickArchive(picked); }, text: busy ? "Archiving…" : archiveBtnText(n) })));
+  return f;
+}
+/** A switch (mock v3): role="switch", aria-checked, 44 px tall, the knob moves. */
+function quickSwitch(label, on, key, disabled, fn) {
+  return h("button", { "class": "qsw", type: "button", role: "switch", "aria-checked": String(!!on), "aria-label": label, "data-k": key, disabled: disabled ? "" : null, onclick: fn }, h("span", { "class": "qtrk", "aria-hidden": "true" }, h("span", { "class": "qknob" })));
+}
+/** Away mode on: one confirm sheet. Off, or a new wait time: straight away (they only make the phone answer less). Every change is one signed away-set. */
+function quickAway(on, minutes, target, ask) {
+  if (!target || S.qa.awayReq) return;
+  var send = function () {
+    createRequest(awayFields(on, minutes, target), { noWatch: true }).then(function (rid) {
+      if (!rid) return;
+      S.qa.awayReq = { rid: rid, on: on === true, at: Date.now() }; renderQuick();
+    });
+  };
+  if (ask) quickAsk(quickConfirm("away"), send); else send();
+}
+function quickKeepAwake(on, target) {
+  if (!target || S.qa.keepReq) return;
+  createRequest(keepAwakeFields(on, target), { noWatch: true }).then(function (rid) {
+    if (!rid) return;
+    S.qa.keepReq = { rid: rid, on: on === true, at: Date.now() }; renderQuick();
+  });
+}
+function quickAwayCard(gate, mm) {
+  var away = mm && mm.away ? mm.away : cleanAway(null), req = S.qa.awayReq, shown = req ? req.on : away.on, busy = !!req, off = !gate.ok || !away.known || busy, mins = S.qa.awayMin || away.timeoutMin;
+  var card = h("div", { "class": "qcard", "data-k": "qaway" }, h("div", { "class": "qswrow" }, h("b", { text: "Away mode" }),
+    quickSwitch("Away mode", shown, "qawaysw", off, function () { if (shown) quickAway(false, mins, gate.target, false); else quickAway(true, mins, gate.target, true); })));
+  card.appendChild(h("div", { "class": "qmuted", style: "margin-top:2px", text: "On: questions and Allow/Deny prompts from your Mac chats come here. Off: they wait on the Mac as usual." }));
+  card.appendChild(h("div", { "class": "qmuted", "data-k": "qawayauto", style: "margin-top:2px", text: "Turns off automatically after 12 h" }));
+  if (away.on && isFinite(away.setAt)) card.appendChild(h("div", { "class": "qmuted", "data-k": "qawaysince", style: "margin-top:2px", text: "On since " + hhmm(away.setAt) }));
+  if (shown) {
+    var seg = h("div", { "class": "qseg inl", role: "radiogroup", "aria-label": "If I don't answer in" });
+    QA_AWAY_MINS.forEach(function (n) {
+      seg.appendChild(h("button", { "class": n === mins ? "on" : "", type: "button", role: "radio", "aria-checked": String(n === mins), "data-k": "qmin-" + n, disabled: off ? "" : null, onclick: function () { S.qa.awayMin = n; quickAway(true, n, gate.target, false); }, text: n + " min" }));
+    });
+    card.appendChild(h("div", { style: "margin-top:10px" }, h("div", { "class": "qmuted", style: "color:var(--text)", text: "If I don't answer in" }), seg, h("div", { "class": "qmuted", style: "margin-top:6px", text: "then: Deny" })));
+  }
+  if (!gate.ok) card.appendChild(h("div", { "class": "qmuted", style: "margin-top:8px", text: "Away mode is off here: " + gate.reason + "." }));
+  else if (!away.known) card.appendChild(h("div", { "class": "qmuted", style: "margin-top:8px", text: "Away mode needs a Mac update." }));
+  return card;
+}
+/** Keep Mac awake: shown only when the Mac says it can (no fake switch). */
+function quickKeepCard(gate, mm) {
+  var k = mm && mm.keepAwake ? mm.keepAwake : cleanKeepAwake(null);
+  if (!gate.ok || !k.available) return null;
+  var req = S.qa.keepReq, shown = req ? req.on : k.on;
+  return h("div", { "class": "qcard", "data-k": "qkeep" }, h("div", { "class": "qswrow" }, h("b", { text: "Keep Mac awake" }), quickSwitch("Keep Mac awake", shown, "qkeepsw", !!req, function () { quickKeepAwake(!shown, gate.target); })),
+    h("div", { "class": "qmuted", style: "margin-top:2px", text: "Stops the Mac sleeping while Away mode is on." }));
+}
+
+/* ---- Tidy (mock v4) ---- */
+function qaT() { return S.qa.tidy || (S.qa.tidy = { at: "", secs: null, uid: 0, extra: [], dirty: false, fresh: false, editing: "", draft: "", leaveOpen: false, apply: null, done: null, undoReq: null, refreshReq: null }); }
+/** Adopt the Mac's suggestions when they are new: never over edits the user has made, unless they asked for fresh ones. */
+function tidySync(T, td) {
+  if (!td || !td.known) return T;
+  if (T.secs && td.at === T.at) { T.extra = td.groups; return T; }
+  if (T.secs && T.dirty && !T.fresh) return T;
+  var b = tidyBuild(td.items, td.groups);
+  T.secs = b.secs; T.uid = b.uid; T.extra = b.extra; T.at = td.at; T.dirty = false; T.fresh = false; T.editing = "";
+  return T;
+}
+function qaCls(el, c, on) {
+  var cur = (" " + str(el.className) + " ").split(" " + c + " ").join(" ").trim();
+  el.className = on ? (cur ? cur + " " : "") + c : cur;
+}
+var QD = null, QD_SUP = 0, QCARDS = Object.create(null);
+function qdBlockTouch(e) { if (e.cancelable) e.preventDefault(); }
+function tidyDragClear() { // safe to call any time: leaves no class, transform, capture or listener behind
+  var d = QD; QD = null; if (!d) return null;
+  clearTimeout(d.t);
+  document.removeEventListener("touchmove", qdBlockTouch);
+  if (d.el) { qaCls(d.el, "drag", false); d.el.style.transform = ""; try { d.el.releasePointerCapture(d.pid); } catch (x) {} }
+  Object.keys(QCARDS).forEach(function (id) { qaCls(QCARDS[id], "over", false); });
+  return d;
+}
+function tidyRowDown(e, el, sid) {
+  if (QD || (e.pointerType === "mouse" && e.button !== 0)) return;
+  var tg = e.target; if (tg && tg.closest && tg.closest(".qtk")) return;
+  QD = { el: el, sid: sid, pid: e.pointerId, x: e.clientX, y: e.clientY, active: false, over: "", t: 0, at: Date.now(), dirty: false };
+  if (tg && tg.closest && tg.closest(".qhd")) tidyStartDrag(); else QD.t = setTimeout(tidyStartDrag, 300);
+}
+function tidyStartDrag() {
+  if (!QD || QD.active) return;
+  QD.active = true; QD.t = 0; QD.at = Date.now();
+  try { QD.el.setPointerCapture(QD.pid); } catch (x) {}
+  qaCls(QD.el, "drag", true); document.addEventListener("touchmove", qdBlockTouch, { passive: false });
+}
+function tidyRowMove(e, el) {
+  if (!QD || QD.el !== el || e.pointerId !== QD.pid) return;
+  var dx = e.clientX - QD.x, dy = e.clientY - QD.y;
+  if (!QD.active) { if (Math.abs(dx) > 8 || Math.abs(dy) > 8) { clearTimeout(QD.t); QD = null; } return; } // the finger moved first: that is a scroll, not a drag
+  el.style.transform = "translate(" + dx + "px," + dy + "px)";
+  var over = "", from = tidyFind(qaT(), QD.sid);
+  Object.keys(QCARDS).forEach(function (id) {
+    var b = QCARDS[id].getBoundingClientRect();
+    if (e.clientX >= b.left && e.clientX <= b.right && e.clientY >= b.top && e.clientY <= b.bottom) over = id;
+    qaCls(QCARDS[id], "over", false);
+  });
+  QD.over = over; if (over && !(from && from.sec.id === over)) qaCls(QCARDS[over], "over", true);
+}
+/** The end of a drag, always: lifted off over a card (commit) moves the chat; off outside every card, cancelled or lost leaves it where it was. */
+function tidyRowEnd(e, el, commit) {
+  if (!QD || QD.el !== el) return;
+  var d = tidyDragClear(); if (!d || !d.active) return;
+  QD_SUP = Date.now() + 80; // the tap that ends a drag must not open "Move to…"
+  var T = qaT(), to = commit && d.over ? tidySecById(T, d.over) : null;
+  if (to && tidyMoveRow(T, d.sid, d.over)) { toast("Moved to " + tidyDestName(to)); renderQuick(); }
+  else if (d.dirty) renderQuick();
+}
+function tidyDestName(s) { return s.kind === "new" ? "New group: " + s.name : s.name; }
+function tidyMoveSheet(sid) {
+  var T = qaT(), at = tidyFind(T, sid); if (!at) return;
+  var list = h("div", { "class": "qmvl" });
+  tidyDestinations(T).forEach(function (d) {
+    var cur = d.secId && d.secId === at.sec.id;
+    list.appendChild(h("button", { "class": "qmv", type: "button", "data-k": "qmv-" + (d.secId || "g:" + d.groupId), onclick: function () {
+      S.ask = null; renderDialog();
+      var id = d.secId || tidyEnsureGroup(T, d.groupId, d.name).id;
+      if (!cur && tidyMoveRow(T, sid, id)) { toast("Moved to " + d.name); renderQuick(); }
+    } }, h("span", { text: d.kind === "new" ? "New group: " + d.name : d.name }), h("span", { "class": "qmuted", text: cur ? "Current ✓" : "" })));
+  });
+  S.ask = { title: "Move to…", body: at.row.title, okLabel: "Cancel", sheet: true, info: true, node: list };
+  renderDialog();
+}
+function tidyCommitName(T, sec, value) {
+  var r = tidyRename(T, sec.id, value);
+  T.editing = ""; T.draft = "";
+  if (!r.ok) toast(r.why === "empty" ? "Give the group a name." : r.why);
+  renderQuick();
+}
+function tidyRowNode(T, sec, r) {
+  var el = h("div", { "class": "qtrow", "data-sid": r.sid });
+  var tk = h("button", { "class": "qtk" + (r.on ? " on" : ""), type: "button", "data-k": "qtk-" + r.sid, "aria-pressed": String(!!r.on), "aria-label": (r.on ? "Included: " : "Not included: ") + r.title, disabled: sec.kind === "leave" ? "" : null,
+    onclick: function () { if (tidyTick(T, r.sid)) renderQuick(); } }, h("span", { "class": "qbox", "aria-hidden": "true", text: "✓" }));
+  var tt = h("button", { "class": "qttl2", type: "button", "data-k": "qtt-" + r.sid, "aria-label": r.title + ". Move to…", onclick: function () { if (Date.now() < QD_SUP) return; tidyMoveSheet(r.sid); } }, h("b", { text: r.title }), h("span", { "class": "qmuted", text: r.why }));
+  var hd = h("button", { "class": "qhd", type: "button", "data-k": "qhd-" + r.sid, "aria-label": "Drag " + r.title, onclick: function (e) { if (e && e.preventDefault) e.preventDefault(); }, text: "≡" });
+  el.appendChild(tk); el.appendChild(tt); el.appendChild(hd);
+  el.addEventListener("pointerdown", function (e) { tidyRowDown(e, el, r.sid); });
+  el.addEventListener("pointermove", function (e) { tidyRowMove(e, el); });
+  el.addEventListener("pointerup", function (e) { tidyRowEnd(e, el, true); });
+  el.addEventListener("pointercancel", function (e) { tidyRowEnd(e, el, false); });
+  el.addEventListener("lostpointercapture", function (e) { tidyRowEnd(e, el, false); });
+  return el;
+}
+function tidyCardNode(T, sec) {
+  var card = h("div", { "class": "qtcard " + sec.kind, "data-sec": sec.id }), head = h("div", { "class": "qthead" });
+  QCARDS[sec.id] = card;
+  if (sec.kind === "leave") {
+    head.appendChild(h("button", { "class": "qthb", type: "button", "data-k": "qleave", "aria-expanded": String(!!T.leaveOpen), onclick: function () { T.leaveOpen = !T.leaveOpen; renderQuick(); } },
+      h("span", { text: "Leave as is" }), h("span", { "class": "qmuted", text: plural(sec.rows.length, "chat", "chats") }), h("span", { "class": "qmuted", text: T.leaveOpen ? "⌄" : "›" })));
+  } else if (sec.kind === "new") {
+    var l = h("div", { "class": "qhl" }, h("span", { text: "→ New group:" }));
+    if (T.editing === sec.id) {
+      var done = false, inp = h("input", { "class": "qnmi", type: "text", maxlength: 40, "data-k": "tidyname", autocomplete: "off", "aria-label": "Group name", value: T.draft || sec.name });
+      inp.addEventListener("input", function () { T.draft = inp.value; });
+      inp.addEventListener("blur", function () { if (done) return; done = true; tidyCommitName(T, sec, inp.value); });
+      inp.addEventListener("keydown", function (e) { if (e.key === "Enter") { e.preventDefault(); if (!done) { done = true; tidyCommitName(T, sec, inp.value); } } });
+      l.appendChild(inp); setTimeout(function () { try { if (inp.isConnected) { inp.focus(); inp.select(); } } catch (x) {} }, 0);
+    } else l.appendChild(h("button", { "class": "qnm", type: "button", "data-k": "qrename-" + sec.id, "aria-label": "Rename new group " + sec.name, onclick: function () { T.editing = sec.id; T.draft = sec.name; renderQuick(); }, text: sec.name + " ✎" }));
+    head.appendChild(l);
+  } else head.appendChild(h("div", { "class": "qhl", text: "→ " + sec.name }));
+  card.appendChild(head);
+  if (sec.kind !== "leave" || T.leaveOpen) {
+    sec.rows.forEach(function (r) { card.appendChild(tidyRowNode(T, sec, r)); });
+    if (!sec.rows.length) card.appendChild(h("div", { "class": "qempty2 qmuted", text: "Drop chats here" }));
+  }
+  return card;
+}
+/** The Mac's suggestions as cards you approve or change. Apply sends exactly the ticked chats, each with the card it sits in. */
+function quickTidyPane(gate, m) {
+  var f = h("div", { "class": "qpane", id: "qp-tidy", role: "tabpanel" }), mm = gate.ok ? m[gate.target] : null, td = mm && mm.tidy ? mm.tidy : cleanTidy(null), T = qaT();
+  tidySync(T, td);
+  QCARDS = Object.create(null);
+  if (T.done) {
+    f.appendChild(h("div", { "class": "qdone", role: "status", style: "margin-top:12px", text: T.done.msg }));
+    if (T.done.applyId) f.appendChild(h("button", { "class": "qlinkb", type: "button", "data-k": "qtundo", disabled: T.undoReq ? "" : null, onclick: function () { quickTidyUndo(gate.target); }, text: T.undoReq ? "Undoing…" : "Undo" }));
+    return f;
+  }
+  f.appendChild(h("div", { "class": "qmuted qlead", text: "Suggestions from the Mac. Approve, or drag a chat to change where it goes. Archive never deletes." }));
+  if (!gate.ok) f.appendChild(h("div", { "class": "qmuted qlead", text: "Tidy is off: " + gate.reason + "." }));
+  else if (!td.known) f.appendChild(h("div", { "class": "qmuted qlead", text: "Tidy needs a Mac update." }));
+  var counts = T.secs ? tidyCounts(T) : { g: 0, a: 0, gs: 0, ng: 0, names: [] };
+  if (T.secs && T.secs.length) {
+    var box = h("div", { "data-k": "qtsecs" });
+    T.secs.forEach(function (s) { box.appendChild(tidyCardNode(T, s)); });
+    f.appendChild(box);
+  } else if (gate.ok && td.known) f.appendChild(h("div", { "class": "qempty" }, h("div", { "class": "big", text: "Nothing to tidy" }), h("div", { "class": "qmuted", text: "Ask the Mac for fresh suggestions." })));
+  f.appendChild(h("button", { "class": "qlinkb", style: "margin:0 2px", type: "button", "data-k": "qtrefresh", disabled: !gate.ok || !td.known || T.refreshReq ? "" : null, onclick: function () { quickTidyRefresh(gate.target); }, text: "Ask the Mac for fresh suggestions" }));
+  var items = T.secs ? tidyApplyItems(T) : [], busy = !!T.apply;
+  f.appendChild(h("div", { "class": "qsticky qtbar" }, h("div", { "class": "qsum", "data-k": "qtsum", text: tidySumText(counts) }),
+    h("button", { "class": "qbtn2", type: "button", "data-k": "qtapply", disabled: !gate.ok || busy || !items.length ? "" : null, onclick: function () { quickTidyApply(gate.target); }, text: busy ? "Applying…" : "Apply" })));
+  return f;
+}
+function quickTidyApply(target) {
+  var T = qaT(), items = tidyApplyItems(T);
+  if (!items.length || T.apply || !target) return;
+  quickAsk({ title: "Apply these changes?", body: tidyConfirmText(tidyCounts(T)), ok: "Apply" }, function () {
+    var again = tidyApplyItems(T); // what is ticked NOW is what goes
+    if (!again.length || T.apply) return;
+    T.apply = { rid: "", at: Date.now(), items: again, target: target }; renderQuick();
+    createRequest(tidyApplyFields(again, target), { noWatch: true }).then(function (rid) {
+      if (!rid) { T.apply = null; renderQuick(); return; }
+      if (T.apply) T.apply.rid = rid; renderQuick();
+    });
+  });
+}
+function quickTidyRefresh(target) {
+  var T = qaT(); if (T.refreshReq || !target) return;
+  createRequest(tidyRefreshFields(target), { noWatch: true }).then(function (rid) {
+    if (!rid) return;
+    T.refreshReq = { rid: rid, at: Date.now() }; T.fresh = true; toast("Asking the Mac… about 30 s"); renderQuick();
+  });
+}
+function quickTidyUndo(target) {
+  var T = qaT(); if (!T.done || !T.done.applyId || T.undoReq || !target) return;
+  createRequest(tidyUndoFields(T.done.applyId, target), { noWatch: true }).then(function (rid) {
+    if (!rid) return;
+    T.undoReq = { rid: rid, at: Date.now() }; renderQuick();
+  });
+}
+function quickMacPane(gate, m) {
+  var f = h("div", { "class": "qpane", id: "qp-mac", role: "tabpanel" }), name = gate.ok ? gate.target : "Mac", now = macNow(m[name], S.relay), busy = !!S.qa.reloadReq;
+  var line = h("div", { "class": "qmuted" }, "Now: Start from phone ", h("b", { "class": now.start ? "qok" : "qoff", text: now.start ? "On" : "Off" }), " · Relay ", h("b", { "class": now.relayOk ? "qok" : "qoff", text: now.relay }), now.loaded ? " · Loaded " + now.loaded : "");
+  f.appendChild(quickAwayCard(gate, m[name]));
+  var keep = quickKeepCard(gate, m[name]); if (keep) f.appendChild(keep);
+  var card = h("div", { "class": "qcard" }, h("b", { text: "Reload bridge settings" }),
+    h("div", { "class": "qmuted", style: "margin:4px 0 8px", text: "Re-reads mc-bridge-config.json on the Mac. Replaces typing /reload-plugins at the Mac." }), line,
+    h("div", { "class": "qrow" }, h("button", { "class": "qbtn2", type: "button", "data-k": "qreload", disabled: gate.ok && !busy ? null : "", onclick: function () { quickReload(gate.target); }, text: busy ? "Reloading…" : "Reload settings" })));
+  if (!gate.ok) card.appendChild(h("div", { "class": "qmuted", style: "margin-top:8px", text: "Reload is off: " + gate.reason + "." }));
+  if (S.qa.reload && S.qa.reload.text) card.appendChild(h("div", { "class": S.qa.reload.ok ? "qdone" : "qfail", role: "status", text: S.qa.reload.text }));
+  f.appendChild(card);
+  f.appendChild(h("div", { "class": "qcard" }, h("b", { text: "Sign a release" }), h("div", { "class": "qmuted", style: "margin-top:4px" }, "Stays on the Mac by design. Run ", h("span", { "class": "qmono", text: "/mc-sign-release" }), " there.")));
+  return f;
+}
+/** What a rebuild of the Tidy pane depends on (the Mac's suggestions are adopted first, so the key and the pane agree). */
+function quickTidySig(gate, m) {
+  var T = qaT(), td = gate.ok && m[gate.target] && m[gate.target].tidy ? m[gate.target].tidy : cleanTidy(null);
+  tidySync(T, td);
+  return [gate, td.known, td.at, T.dirty, T.editing, T.leaveOpen, !!T.apply, T.done, !!T.undoReq, !!T.refreshReq, (T.secs || []).map(function (x) { return [x.id, x.kind, x.name, x.rows.map(function (r) { return [r.sid, r.on, r.title, r.why]; })]; })];
+}
+var QA_SEGS = [["wait", "Waiting"], ["run", "Run"], ["tidy", "Tidy"], ["mac", "Mac"]];
+function renderQuick() {
+  var host = $("quickHost"); if (!host) return;
+  renderQuickBtn();
+  if (!S.qa.open) { tidyDragClear(); if (host.firstChild) { clear(host); if (!S.focus) setInert(false); } host.removeAttribute("data-key"); return; }
+  if (QD && QD.active) { if (Date.now() - QD.at > 15000) tidyDragClear(); else { QD.dirty = true; return; } } // never rebuild the row that is under a finger
+  var m = S.model ? S.model.mstat : derive().mstat, gate = quickGate(m), cards = quickCardsNow(), n = quickCount(cards), seg = S.qa.seg;
+  var key = JSON.stringify([seg, n, gate, cards.map(function (c) { return [c.id, c.kind, c.title, c.ask, c.stuckFor, c.rc, c.done, c.online, !!S.qa.pend[c.id], c.awayOn, c.item ? [c.item.inputHash, Math.floor(Date.now() / 60000)] : 0, JSON.stringify(S.qa.qsel && S.qa.qsel[c.id] || 0)]; }),
+    seg === "run" ? [startGate(m), gate.ok && m[gate.target] ? m[gate.target].saved : 0] : 0,
+    seg === "tidy" ? quickTidySig(gate, m) : 0,
+    seg === "mac" ? [macNow(m[gate.ok ? gate.target : "Mac"], S.relay), S.qa.reload, !!S.qa.reloadReq, gate.ok ? [m[gate.target].away, m[gate.target].keepAwake] : 0, S.qa.awayReq, S.qa.keepReq, S.qa.awayMin] : 0]);
+  if (host.getAttribute("data-key") === key) { setInert(true); return; }
+  var opening = !host.firstChild, ae = document.activeElement, keepK = !opening && ae && host.contains(ae) ? ae.getAttribute("data-k") : "", ss = keepK && ae.selectionStart, se = keepK && ae.selectionEnd;
+  var oldBody = host.querySelector(".qbody"), oldTop = oldBody && oldBody.getAttribute("data-seg") === seg ? oldBody.scrollTop : 0;
+  host.setAttribute("data-key", key); clear(host);
+  var segs = h("div", { "class": "qseg", role: "tablist", "aria-label": "Quick actions" });
+  QA_SEGS.forEach(function (sx) {
+    segs.appendChild(h("button", { type: "button", role: "tab", "data-k": "qseg-" + sx[0], "aria-selected": String(seg === sx[0]), "aria-controls": "qp-" + sx[0], "class": seg === sx[0] ? "on" : "", onclick: function () { S.qa.seg = sx[0]; if (S.qa.tidy && S.qa.tidy.done && sx[0] !== "tidy") S.qa.tidy.done = null; renderQuick(); } },
+      sx[1], sx[0] === "wait" && n ? h("span", { "class": "qn", "aria-label": n + " waiting", text: String(n) }) : null));
+  });
+  var body = h("div", { "class": "qbody", "data-seg": seg }, seg === "run" ? quickRunPane(gate, m) : seg === "tidy" ? quickTidyPane(gate, m) : seg === "mac" ? quickMacPane(gate, m) : quickWaitPane(cards, gate));
+  var sheet = h("section", { "class": "qsheet", role: "dialog", "aria-modal": "true", "aria-label": "Quick actions" },
+    h("div", { "class": "qgrab", "aria-hidden": "true" }, h("i")),
+    h("div", { "class": "qhead" }, h("span", { "class": "qsp", "aria-hidden": "true" }), h("h2", { id: "qtitle", tabindex: "-1", text: "Quick actions" }), h("button", { "class": "qlink", type: "button", "data-k": "qdone", onclick: closeQuick, text: "Done" })),
+    segs, body);
+  sheet.addEventListener("keydown", function (e) { trapTab(e, sheet); });
+  host.appendChild(h("button", { "class": "qscrim", type: "button", "aria-hidden": "true", tabindex: "-1", onclick: closeQuick }));
+  host.appendChild(sheet);
+  setInert(true);
+  body.scrollTop = oldTop;
+  if (opening) { $("qtitle").focus(); return; }
+  var tgt = keepK ? host.querySelector('[data-k="' + cssEsc(keepK) + '"]') : null;
+  if (tgt && !tgt.disabled) { tgt.focus(); try { if (ss != null) tgt.setSelectionRange(ss, se); } catch (e) {} }
+}
+
+/* @quick-ui-end */
 function renderDialog() {
   var host = $("dlgHost");
   var key = S.ask ? S.ask.title + "|" + S.ask.body : "";
@@ -3746,9 +4798,9 @@ function renderDialog() {
   var a = S.ask, cancel = null;
   if (!wasOpen) S.askOpener = a.opener || document.activeElement;
   if (!a.info) cancel = h("button", { "class": "btn", type: "button", onclick: function () { S.ask = null; renderDialog(); if (a.onCancel) a.onCancel(); }, text: "Cancel" });
-  var okBtn = h("button", { "class": "btn" + (a.primary ? " primary" : a.info ? "" : " dark"), type: "button", onclick: function () { if (a.keep) { if (a.ok) a.ok(); return; } S.ask = null; renderDialog(); if (a.ok) a.ok(); }, text: a.okLabel });
+  var okBtn = h("button", { "class": "btn" + (a.danger ? " danger" : a.primary ? " primary" : a.info ? "" : " dark"), type: "button", onclick: function () { if (a.keep) { if (a.ok) a.ok(); return; } S.ask = null; renderDialog(); if (a.ok) a.ok(); }, text: a.okLabel });
   a.btn = okBtn;
-  var scrim = h("div", { "class": "scrim" }, h("div", { "class": "dlg", role: a.info ? "dialog" : "alertdialog", "aria-modal": "true", "aria-labelledby": "dlgTitle", "aria-describedby": a.body ? "dlgBody" : null },
+  var scrim = h("div", { "class": "scrim" + (a.sheet ? " qcf" : "") }, h("div", { "class": "dlg" + (a.sheet ? " qcfb" : ""), role: a.info ? "dialog" : "alertdialog", "aria-modal": "true", "aria-labelledby": "dlgTitle", "aria-describedby": a.body ? "dlgBody" : null },
     h("h2", { id: "dlgTitle", text: a.title }), a.body ? h("p", { id: "dlgBody", text: a.body }) : null, a.node || null,
     h("div", { "class": "bt" }, cancel, okBtn)));
   scrim.addEventListener("keydown", function (e) { trapTab(e, scrim); if (a.keep && e.key === "Enter" && e.target && e.target.tagName === "INPUT") { e.preventDefault(); if (a.ok) a.ok(); } }); // Return submits
@@ -4015,14 +5067,15 @@ function init() {
   $("moreBtn").appendChild(icon("more", 18));
   $("moreBtn").addEventListener("click", function () { if (S.menuOpen) menuClose(); else openMenu(); });
   $("macChip").addEventListener("click", function () { openMenu(); });
+  $("quickBtn").addEventListener("click", function () { if (S.qa.open) closeQuick(); else openQuick("wait"); });
   $("usageRow").addEventListener("click", openUsage);
   document.addEventListener("keydown", function (e) {
     if (e.key === "Escape") {
       var ae = document.activeElement, inReply = ae && ae.matches && ae.matches("#focusHost input, #focusHost textarea");
-      if (S.ask) { S.ask = null; renderDialog(); } else if (S.menuOpen) menuClose(); else if (inReply) ae.blur(); else if (S.focus) closeFocus(); else if (S.openRow) S.openRow.close();
+      if (S.ask) { S.ask = null; renderDialog(); } else if (S.menuOpen) menuClose(); else if (S.qa.open) closeQuick(); else if (inReply) ae.blur(); else if (S.focus) closeFocus(); else if (S.openRow) S.openRow.close();
       return;
     }
-    if (e.defaultPrevented || e.metaKey || e.ctrlKey || e.altKey || S.ask || S.menuOpen) return;
+    if (e.defaultPrevented || e.metaKey || e.ctrlKey || e.altKey || S.ask || S.menuOpen || S.qa.open) return;
     var t = e.target, tag = t && t.tagName, typing = tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
     if (t && t.closest && t.closest("#focusHost")) return; // arrows inside the docked panel belong to the panel
     if (e.key === "/" && !typing && S.tab === "sessions" && isWide()) { var q = document.querySelector('[data-k="search"]'); if (q) { e.preventDefault(); q.focus(); } return; }
