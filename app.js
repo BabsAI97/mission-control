@@ -27,6 +27,7 @@ var S = {
   requests: [], reqLoaded: false,
   now: Date.now(), titles: Object.create(null), byId: Object.create(null), busy: Object.create(null), askOpener: null, actFocus: false,
   view: "home", group: null, sub: null, sel: null, list: false, viewSet: false, more: Object.create(null),
+  sent: Object.create(null), showAll: Object.create(null),
   menuOpen: false, menuFocus: "", focus: null, focusOpenedAt: 0, focusOpener: null, peek: Object.create(null), peekReq: Object.create(null), peekLast: Object.create(null), focusFocus: false,
   zoom: 1, panX: 0, panY: 0,
   drafts: Object.create(null), reqErr: "", unknown: Object.create(null), pairUI: null, relayReadyAt: 0, reqSnapAt: 0, focusTimer: 0, lastRefreshAt: 0, focusActiveAt: 0, undo: null,
@@ -98,6 +99,7 @@ var BRIDGE_ERRORS = Object.assign(Object.create(null), {
   "no pairing code": "The Mac has no pairing code right now. Ask it for a new code.",
   "code expired": "That code expired. Ask the Mac for a new code.",
   "slow down": "Too many requests. Wait a minute, then try again.",
+  "start-blocked-remote-control": "The Mac chat running Mission Control is being remote-controlled, so it can\u2019t start sessions. Open another chat on the Mac (or stop Remote Control there) and try again.",
   "tool error": "The Claude app on your Mac refused it. The reason is in the Mac\u2019s debug log.",
   "no folder": "Your Mac has no folder set for that project.",
   "bad name": "That device name isn\u2019t allowed. Use letters and numbers.",
@@ -108,6 +110,7 @@ var BRIDGE_ERRORS = Object.assign(Object.create(null), {
 /** Plain words for a request's error or result (the bridge's own error texts are mapped; anything else is shown as it is). */
 function friendlyError(action, out) {
   var t = str(out), bare = t.replace(/^tool error:\s*/i, "");
+  if (action === "archive" && /^unpinned,\s*/i.test(bare)) return "The chat was unpinned, but archiving it failed (" + bare.replace(/^unpinned,\s*/i, "") + "). Try Archive again."; // REVIEW-v17-final M1: never say "pinned" after the Mac unpinned it
   if (action === "archive") { var ae = ARCHIVE_ERRORS[bare.toLowerCase()]; if (ae) return ae; } // L-round 11: one plain sentence per archive refusal code
   if (action === "skill-verdict") { var se = SKILL_ERRORS[bare.toLowerCase()]; if (se) return se; }
   var plain = rfRefusal(action, t); // refocus: one plain sentence per refusal, never a raw code
@@ -115,14 +118,15 @@ function friendlyError(action, out) {
   if (BRIDGE_ERRORS[t]) return BRIDGE_ERRORS[t];
   if (bare !== t && RF_ACTIONS.indexOf(action) >= 0 && BRIDGE_ERRORS[bare]) return BRIDGE_ERRORS[bare];
   if (RF_ACTIONS.indexOf(action) >= 0 && t) return rfGeneric(bare);
-  return action === "archive" && /pinned/i.test(t) ? "Not archived: session is pinned. Unpin it first." : t;
+  return action === "archive" && /pinned/i.test(t) && !/unpinned/i.test(t) ? "Not archived: session is pinned. Archive it again and confirm." : t;
 }
 /** Plain sentences for the bridge's archive refusal codes (archiveWhy, refuse, verifyArchived, the watchdog). Looked up lower-case, with any "tool error:" prefix removed. */
 var ARCHIVE_ERRORS = Object.assign(Object.create(null), {
   "still working": "That chat is still working \u2014 archive it when it stops.",
-  "pinned session": "That chat is pinned \u2014 unpin it on the Mac first.",
-  "pinned": "That chat is pinned \u2014 unpin it on the Mac first.",
-  "scheduled task": "That chat belongs to a scheduled task, so it can\u2019t be archived here.",
+  "pinned session": "That chat is pinned. Archive it again and confirm \u2014 archiving unpins it.",
+  "pinned": "That chat is pinned. Archive it again and confirm \u2014 archiving unpins it.",
+  "scheduled task": "That chat belongs to a scheduled task. Archive it again and confirm \u2014 the task will still run and start new chats.",
+  "not unpinned": "The Mac couldn\u2019t unpin that chat, so it was not archived.",
   "gn session": "That is the /gn chat, so it can\u2019t be archived here.",
   "assistant session": "That is the Assistant chat, so it can\u2019t be archived.",
   "child still active": "A chat it started may still need you \u2014 archive that one first.",
@@ -420,7 +424,7 @@ async function connect() {
   });
   unsubs.push(S.db.collection("requests").orderBy("createdAt", "desc").limit(200).onSnapshot(function (snap) {
     ingestRequests(snap.docs.map(function (d) { return d.data() || {}; })); S.reqSnapAt = Date.now();
-    checkUnknown(); checkRefresh(); checkSendWatch(); checkReqWatch(); checkPairWatch();
+    checkUnknown(); checkRefresh(); checkSendWatch(); sentTick(); checkReqWatch(); checkPairWatch();
     render();
   }, onDbError));
   S.db.connect();
@@ -652,7 +656,7 @@ function listTargets(machines, now, onlineMs) {
 function sendFields(sid, text, machines, about, target) { var f = { action: "send", sessionId: sid, text: text, target: target || pickTarget(sid, machines), ttlSec: SEND_TTL_SEC }; if (about) f.about = about; return f; }
 /** ttlSec for every action the app creates (contract v0.7.2: 60-300). */
 var REQ_TTL = { send: 300, peek: 60, list: 60, archive: 120, restore: 120, start: 300, "agent-save": 300, "agent-run": 300, "agent-toggle": 300, "agent-delete": 300, "research-now": 300, unpair: 120, "pair-start": 120, pair: 120, answer: 120, "reload-config": 60, "away-set": 120, "perm-answer": 120, "q-answer": 120, "keep-awake": 120, "tidy-refresh": 60, "tidy-apply": 300, "tidy-undo": 120, "skill-verdict": 120, "decision-answer": 120, "decision-snooze": 120, "decision-dismiss": 120, "decision-undo": 120, "decision-ask": 120, "decision-doit": 120, "job-approve": 120, "job-skip": 120, "job-restore": 120, "push-subscribe": 120, "push-unsubscribe": 120 };
-function archiveFields(sid, machines) { return { action: "archive", sessionId: sid, target: pickTarget(sid, machines) }; }
+function archiveFields(sid, machines, confirm) { var f = { action: "archive", sessionId: sid, target: pickTarget(sid, machines) }; if (confirm === true) f.confirm = true; return f; } // v17: confirm = the user was told what archiving this pinned / scheduled-task chat costs and said yes
 function refreshFields(machines, now, onlineMs) {
   var ts = listTargets(machines, now, onlineMs);
   return ts.length ? ts.map(function (n) { return { action: "list", target: n }; }) : [{ action: "list" }];
@@ -666,6 +670,7 @@ function requestBody(f, id, iso) {
   var ttl = f.ttlSec || REQ_TTL[f.action]; // contract v0.7.2: every action carries ttlSec, 60 to 300
   if (ttl) body.ttlSec = Math.min(300, Math.max(60, Math.floor(Number(ttl)) || 60));
   if (f.about && /^local_[0-9a-f-]{36}$/.test(str(f.about))) body.about = f.about;
+  if (f.action === "archive" && f.confirm === true) body.confirm = true; // signed with the rest: the Mac archives a pinned / scheduled-task chat only with it
   if (f.action === "agent-save") { body.agent = Object.assign({}, f.agent); }
   if (f.action === "agent-delete") body.agentId = f.agentId;
   if (f.action === "agent-run") { body.agentId = f.agentId; if (f.extra) body.extra = f.extra; }
@@ -865,7 +870,7 @@ function tinyLabel(label) {
 }
 
 /* ---------- focus panel: peek requests and rendering (contract v0.4 "peek") ---------- */
-var PEEK_TTL_SEC = 60, PEEK_EVERY_MS = 20000, PEEK_NOLOG_MS = 15000, PEEK_MAX_ITEMS = 20, PEEK_TEXT = 1200;
+var PEEK_TTL_SEC = 60, PEEK_EVERY_MS = 20000, PEEK_NOLOG_MS = 15000, PEEK_MAX_ITEMS = 20, PEEK_TEXT = 6000, PEEK_COLLAPSE = 1200; // v17: the bridge sends up to 6,000 characters a message; the phone folds anything over 1,200 behind "Show all"
 var PEEK_NOLOG_TEXT = "Couldn’t load the log — the Mac bridge may need updating";
 function peekFields(sid, machines) { return { action: "peek", sessionId: sid, target: pickTarget(sid, machines), ttlSec: PEEK_TTL_SEC }; }
 /** The request document the page writes for a peek. */
@@ -893,11 +898,16 @@ function peekView(doc, max) {
   (Array.isArray(doc.items) ? doc.items : []).forEach(function (x) {
     if (!x || typeof x !== "object") return;
     var kind = x.kind === "user" || x.kind === "assistant" || x.kind === "tools" ? x.kind : "";
-    var text = str(x.text).replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "").trim().slice(0, kind === "tools" ? 200 : PEEK_TEXT);
-    if (kind && text) items.push({ kind: kind, at: Date.parse(x.at), text: text, ask: x.ask === true && kind === "assistant" });
+    var whole = str(x.text).replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "").trim(), lim = kind === "tools" ? 200 : PEEK_TEXT;
+    var text = whole.slice(0, lim);
+    var sum = kind === "assistant" ? mdClean(x.summary).replace(/\s+/g, " ").trim().slice(0, 300) : "";
+    if (kind && text) items.push({ kind: kind, at: Date.parse(x.at), text: text, ask: x.ask === true && kind === "assistant", cut: x.cut === true || whole.length > lim, summary: sum }); // summary only when the Mac sent one (never made here); cut: the Mac (or this page) shortened it
+    // never silently cut: a message that is still clipped says so (see peekMsgNode)
   });
   items = items.slice(-(max || PEEK_MAX_ITEMS));
   items.forEach(function (it, i) { if (i !== items.length - 1) it.ask = false; });
+  var docSum = mdClean(doc.summary).replace(/\s+/g, " ").trim().slice(0, 300), lastA = items.length && items[items.length - 1].kind === "assistant" ? items[items.length - 1] : null;
+  if (docSum && lastA && !lastA.summary) lastA.summary = docSum;
   var earlier = Math.max(0, Math.min(100000, Math.floor(Number(doc.earlier) || 0)));
   return { status: status, at: Date.parse(doc.at), items: items, earlier: earlier, error: str(doc.error).slice(0, 80) };
 }
@@ -913,13 +923,213 @@ function peekAgeText(at, now) {
   var s = Math.max(0, Math.round((now - at) / 1000));
   return "updated " + (s < 60 ? s + " s" : s < 3600 ? Math.round(s / 60) + " min" : Math.round(s / 3600) + " h") + " ago";
 }
-/** One chat item as DOM. Every piece of text goes in through textContent (h's `text`), never innerHTML. */
+/** v17 sent-from-this-phone messages: the words under a message the log does not show yet. st = "sending" (the request is not done) | "done" | "error"; running = the chat is working. */
+var SENT_KEEP_MS = 90000;
+function sentWord(st, running) { return st === "error" ? "Not delivered \u2014 type it again to retry" : st === "done" ? (running ? "Claude is working" : "Delivered") : "Sending\u2026"; }
+/** Chat items for what was sent from this phone and is not in the log yet. entries = [{ text, at, st }]; a finished one is dropped 90 s after it was sent or as soon as the log shows its text. */
+function sentItems(entries, items, running, now) {
+  var users = (Array.isArray(items) ? items : []).filter(function (it) { return it && it.kind === "user"; }).slice(-8).map(function (it) { return str(it.text).trim(); }), out = [];
+  (Array.isArray(entries) ? entries : []).forEach(function (e) {
+    if (!e || !str(e.text).trim() || (e.st !== "sending" && now - e.at > SENT_KEEP_MS) || users.indexOf(str(e.text).trim()) >= 0) return;
+    out.push({ kind: "user", at: e.at, text: str(e.text), ask: false, cut: false, sent: sentWord(e.st, running) });
+  });
+  return out;
+}
+/** Folded text for a long message: cut at the last space before `max`, never inside a [text](url) link, "…" added. */
+function collapseText(t, max) {
+  t = str(t); if (t.length <= max) return t;
+  var cut = max, sp = t.lastIndexOf(" ", cut), nl = t.lastIndexOf("\n", cut); sp = Math.max(sp, nl); if (sp > max * 0.6) cut = sp;
+  var re = /\[[^\]\n]{0,300}\]\([^)\s]{0,2000}\)/g, m;
+  while ((m = re.exec(t)) && m.index < cut) if (m.index + m[0].length > cut) { cut = m.index; break; }
+  return t.slice(0, cut).replace(/\s+$/, "") + "\u2026";
+}
+/* ---------- v17 chat view: safe markdown subset (rules, no AI). The text is parsed into a small tree and built as DOM from the whitelist below; text only ever enters through text nodes, never as markup. ---------- */
+var MD_TAGS = ["div", "p", "strong", "em", "code", "pre", "ul", "ol", "li", "span", "a", "br"], MD_ATTRS = ["class", "href", "target", "rel", "tabindex", "aria-hidden", "aria-label"];
+var MD_BAD = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f؜‎‏‪-‮⁦-⁩]/g; // control and bidi characters: dropped from shown text so what you see is what is there
+function mdClean(t) { return str(t).replace(/\r\n?/g, "\n").replace(/\t/g, "    ").replace(MD_BAD, ""); }
+/** A link target the page may open: https only, no whitespace, quotes, angle brackets or hidden characters, no user:password@, at most 2,000 characters. Returns the normal form or "". */
+function mdSafeUrl(u) {
+  u = str(u);
+  if (u.length > 2000 || !/^https:\/\/[^\s<>"'`\\\u0000-\u001f\u007f-\u009f؜​-‏‪-‮⁠-⁩﻿]+$/.test(u)) return "";
+  try { var p = new URL(u); if (p.protocol !== "https:" || p.username || p.password || !p.hostname) return ""; return p.href; } catch (e) { return ""; }
+}
+/** A YouTube link as a source: { id, ts } (ts in seconds, or 0), else null. */
+function mdYouTube(href) {
+  try {
+    var p = new URL(href), host = p.hostname.replace(/^(www|m)\./, ""), id = "";
+    if (host === "youtu.be") id = p.pathname.slice(1); else if (host === "youtube.com" && p.pathname === "/watch") id = p.searchParams.get("v") || "";
+    if (!/^[\w-]{6,15}$/.test(id)) return null;
+    var t = p.searchParams.get("t") || p.searchParams.get("start") || "", m = /^(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s?)?$/.exec(t), ts = 0;
+    if (t && m) ts = (+m[1] || 0) * 3600 + (+m[2] || 0) * 60 + (+m[3] || 0);
+    return { id: id, ts: Math.min(ts, 86400 * 2) };
+  } catch (e) { return null; }
+}
+function mdTime(sec) { var n = Math.max(0, Math.floor(+sec || 0)), hh = Math.floor(n / 3600), m = Math.floor(n / 60) % 60, s = n % 60; return (hh ? hh + ":" + (m < 10 ? "0" : "") : "") + m + ":" + (s < 10 ? "0" : "") + s; }
+function mdPlain(nodes) { return nodes.map(function (n) { return n.t === "text" || n.t === "code" ? n.v : n.k ? mdPlain(n.k) : n.v || ""; }).join(""); }
+/** [label](https://...) at position i of s: { node, end } or null (then the characters stay plain text). */
+function mdLink(s, i) {
+  var d = 0, j = i;
+  for (; j < s.length && j < i + 300; j++) { var c = s[j]; if (c === "\\") { j++; continue; } if (c === "[") d++; else if (c === "]") { d--; if (!d) break; } }
+  if (j >= s.length || s[j] !== "]" || s[j + 1] !== "(") return null;
+  var k = j + 2, pd = 0;
+  for (; k < s.length && k < j + 2004; k++) { var ch = s[k]; if (/\s/.test(ch)) return null; if (ch === "(") pd++; else if (ch === ")") { if (!pd) break; pd--; } }
+  if (k >= s.length || s[k] !== ")") return null;
+  var href = mdSafeUrl(s.slice(j + 2, k)); if (!href) return null;
+  var label = mdPlain(mdInline(s.slice(i + 1, j), 3, true)).replace(/\s+/g, " ").trim() || href.replace(/^https:\/\//, "").split("/")[0], yt = mdYouTube(href);
+  return { end: k + 1, node: yt ? { t: "src", v: label, href: href, ts: yt.ts } : { t: "link", v: label, href: href } };
+}
+/** Inline text -> [{ t: text|b|i|code|link|src }]. Anything it does not understand stays literal text. */
+function mdInline(s, depth, noLink) {
+  s = str(s); depth = depth | 0;
+  var out = [], buf = "", i = 0, n = s.length, e;
+  function flush() { if (buf) { out.push({ t: "text", v: buf }); buf = ""; } }
+  while (i < n) {
+    var c = s[i];
+    if (c === "\\" && i + 1 < n && /[\\`*\[\]()#_<>~-]/.test(s[i + 1])) { buf += s[i + 1]; i += 2; continue; }
+    if (c === "`") { e = s.indexOf("`", i + 1); if (e > i + 1) { flush(); out.push({ t: "code", v: s.slice(i + 1, e) }); i = e + 1; continue; } }
+    if (c === "*" && s[i + 1] === "*" && depth < 4) { e = s.indexOf("**", i + 2); if (e > i + 2) { flush(); out.push({ t: "b", k: mdInline(s.slice(i + 2, e), depth + 1, noLink) }); i = e + 2; continue; } }
+    if (c === "*" && depth < 4 && s[i + 1] && !/[\s*]/.test(s[i + 1])) { e = s.indexOf("*", i + 1); if (e > i + 1 && !/\s/.test(s[e - 1]) && s[e + 1] !== "*") { flush(); out.push({ t: "i", k: mdInline(s.slice(i + 1, e), depth + 1, noLink) }); i = e + 1; continue; } }
+    if (c === "[" && !noLink) { var L = mdLink(s, i); if (L) { flush(); out.push(L.node); i = L.end; continue; } }
+    buf += c; i++;
+  }
+  flush(); return out;
+}
+var MD_LI = /^(\s*)([-*+]|\d{1,3}[.)])\s+(\S.*)$/;
+/** Text -> blocks: { t: p|h|code|list }. A list is { t: "list", ord, items: [{ num, inl, sub: [list] }] }. */
+function mdBlocks(src) {
+  var L = mdClean(src).split("\n"), out = [], i = 0, m;
+  while (i < L.length) {
+    var l = L[i];
+    if (/^\s*```/.test(l)) { var code = []; i++; while (i < L.length && !/^\s*```/.test(L[i])) code.push(L[i++]); i++; out.push({ t: "code", v: code.join("\n") }); continue; }
+    if (!l.trim() || /^\s*(?:[-*_]\s*){3,}$/.test(l)) { i++; continue; }
+    if ((m = /^\s{0,3}#{1,6}\s+(.*?)\s*#*\s*$/.exec(l))) { out.push({ t: "h", inl: mdInline(m[1]) }); i++; continue; }
+    if (MD_LI.test(l)) {
+      var rows = [];
+      while (i < L.length) {
+        var x = L[i], lm = MD_LI.exec(x);
+        if (/^\s*```/.test(x)) break;
+        if (lm) rows.push({ ind: lm[1].length, ord: /\d/.test(lm[2].charAt(0)), num: /\d/.test(lm[2].charAt(0)) ? parseInt(lm[2], 10) : 0, txt: lm[3], ex: [] });
+        else if (!x.trim()) { var j = i + 1; while (j < L.length && !L[j].trim()) j++; if (j < L.length && (MD_LI.test(L[j]) || /^\s{2,}\S/.test(L[j])) && !/^\s*```/.test(L[j])) { i++; continue; } break; }
+        else if (/^\s{2,}\S/.test(x)) { var ind = /^\s*/.exec(x)[0].length, t = rows.length - 1; for (var q = rows.length - 1; q >= 0; q--) if (rows[q].ind < ind) { t = q; break; } rows[t].ex.push(x.trim()); }
+        else break;
+        i++;
+      }
+      out.push(mdListTree(rows)); continue;
+    }
+    var p = [];
+    while (i < L.length && L[i].trim() && !/^\s*```/.test(L[i]) && !/^\s{0,3}#{1,6}\s/.test(L[i]) && !MD_LI.test(L[i])) p.push(L[i++].replace(/^\s{0,3}>\s?/, "").trim());
+    if (p.length) out.push({ t: "p", lines: p.map(function (z) { return mdInline(z); }) }); else i++;
+  }
+  return out;
+}
+function mdListTree(rows) {
+  var root = { t: "list", ord: rows[0].ord, items: [] }, stack = [{ ind: rows[0].ind, list: root }];
+  rows.forEach(function (r) {
+    while (stack.length > 1 && r.ind < stack[stack.length - 1].ind) stack.pop();
+    var top = stack[stack.length - 1];
+    if (r.ind > top.ind && top.list.items.length && stack.length < 4) { var nl = { t: "list", ord: r.ord, items: [] }; top.list.items[top.list.items.length - 1].sub.push(nl); top = { ind: r.ind, list: nl }; stack.push(top); }
+    top.list.items.push({ num: r.num, inl: mdInline([r.txt].concat(r.ex).join(" ")), sub: [] });
+  });
+  return root;
+}
+/** The question a waiting message ends with: its last sentence that ends in "?" (final paragraph only), else the heartbeat's ask text, else "". */
+function questionOf(text, fallback) {
+  var t = mdClean(text).replace(/\s+$/, ""), paras = t.split(/\n\s*\n/), last = paras[paras.length - 1] || "", m = last.replace(/\*\*|__|`/g, "").match(/[^.!?\n]*\?/g), q = "";
+  if (m && m.length) { q = m[m.length - 1].replace(/^\s*(?:[-*+•]|\d{1,2}[.)])\s+/, "").replace(/\s+/g, " ").trim(); if (q.length > 300) q = ""; }
+  if (!q) q = mdClean(fallback).replace(/\s+/g, " ").trim().slice(0, 300);
+  return q;
+}
+/** The message without its final question paragraph when that paragraph is only the question (the question has its own box). */
+function dropQuestion(text, q) {
+  if (!q) return text;
+  var t = mdClean(text).replace(/\s+$/, ""), k = t.lastIndexOf("\n\n"), lastP = (k >= 0 ? t.slice(k + 2) : t).replace(/\*\*|__|`/g, "").replace(/\s+/g, " ").trim();
+  return lastP === q && k >= 0 ? t.slice(0, k) : text;
+}
+/** "Today", "Yesterday" or "Mon 23 Nov" for a message time. */
+function dayLabel(at, now) {
+  if (!isFinite(at)) return "";
+  var a = new Date(at), b = new Date(now), da = Date.UTC(a.getFullYear(), a.getMonth(), a.getDate()), db = Date.UTC(b.getFullYear(), b.getMonth(), b.getDate()), d = Math.round((db - da) / 86400000);
+  if (d === 0) return "Today"; if (d === 1) return "Yesterday";
+  return ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][a.getDay()] + " " + a.getDate() + " " + ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][a.getMonth()];
+}
+/** The DOM for the tree: only MD_TAGS and MD_ATTRS, links https-only with rel=noopener noreferrer target=_blank, text through text nodes. */
+function mdLinkNode(cls, href, kids, label) { return h("a", { "class": cls, href: href, target: "_blank", rel: "noopener noreferrer", "aria-label": label || null }, kids); }
+function mdInlineInto(parent, nodes, cites) {
+  nodes.forEach(function (n) {
+    if (n.t === "text") parent.appendChild(document.createTextNode(n.v));
+    else if (n.t === "code") parent.appendChild(h("code", { text: n.v }));
+    else if (n.t === "b" || n.t === "i") { var e = h(n.t === "b" ? "strong" : "em"); mdInlineInto(e, n.k, cites); parent.appendChild(e); }
+    else if (n.t === "link") parent.appendChild(mdLinkNode("lk", n.href, [document.createTextNode(n.v), h("span", { "class": "ext", "aria-hidden": "true", text: " ↗" })]));
+    else if (n.t === "src") cites.push(n);
+  });
+}
+function mdChips(cites) {
+  var seen = Object.create(null), kids = [];
+  cites.forEach(function (c) { if (seen[c.href]) return; seen[c.href] = 1; kids.push(mdLinkNode("schip", c.href, [h("span", { "class": "pl", "aria-hidden": "true", text: "▶" }), document.createTextNode(c.v), c.ts ? h("span", { "class": "cts", text: mdTime(c.ts) }) : null], "Source " + c.v + (c.ts ? " at " + mdTime(c.ts) : ""))); });
+  return kids.length ? h("div", { "class": "srcs" }, kids) : null;
+}
+function mdListNode(b) {
+  var list = h(b.ord ? "ol" : "ul");
+  b.items.forEach(function (it) {
+    var li = h("li"), cites = [];
+    if (b.ord) li.appendChild(h("span", { "class": "mk", text: String(it.num) }));
+    mdInlineInto(li, it.inl, cites);
+    it.sub.forEach(function (s) { li.appendChild(mdListNode(s)); });
+    var ch = mdChips(cites); if (ch) li.appendChild(ch);
+    list.appendChild(li);
+  });
+  return list;
+}
+/** Fills `host` with the rendered blocks (it is emptied first). */
+function mdFill(host, text) {
+  host.textContent = "";
+  mdBlocks(text).forEach(function (b) {
+    if (b.t === "code") host.appendChild(h("pre", { tabindex: "0" }, h("code", { text: b.v })));
+    else if (b.t === "h") { var hp = h("p", { "class": "mdh" }), hc = []; mdInlineInto(hp, b.inl, hc); host.appendChild(hp); var hch = mdChips(hc); if (hch) host.appendChild(hch); }
+    else if (b.t === "list") host.appendChild(mdListNode(b));
+    else if (b.t === "p") {
+      var p = h("p"), cites = [];
+      b.lines.forEach(function (ln, k) { if (k) p.appendChild(h("br")); mdInlineInto(p, ln, cites); });
+      host.appendChild(p); var ch = mdChips(cites); if (ch) host.appendChild(ch);
+    }
+  });
+}
+var PEEK_CUT_NOTE = "Message shortened \u2014 open on the Mac for the rest.";
+/** The key a long message's open / folded state is kept under (the chat is rebuilt every few seconds). */
+function showKey(it) { return str(it.kind) + ":" + (isFinite(it.at) ? it.at : "") + ":" + str(it.text).length + ":" + str(it.text).slice(0, 24); }
+/** The body of one message: whole when short; folded to PEEK_COLLAPSE with a "Show all" button when long (the button swaps the text in place and remembers its choice); a message the Mac or this page shortened says so once it is fully shown. An assistant message is shown as markdown (mdFill), your own as plain text. `it.body` = the text to show when it differs from it.text (the question moved into its own box). */
+function peekBodyNodes(it) {
+  var src = it.body != null ? it.body : it.text, md = it.kind === "assistant";
+  var long = src.length > PEEK_COLLAPSE, key = showKey(it), all = typeof S === "object" && S ? (S.showAll || (S.showAll = Object.create(null))) : Object.create(null);
+  var mb = h("div", { "class": md ? "mb md" : "mb" });
+  function put(open) { var t = long && !open ? collapseText(src, PEEK_COLLAPSE) : src; if (md) mdFill(mb, t); else mb.textContent = t; mb.className = (md ? "mb md" : "mb") + (long && !open ? " fold" : ""); }
+  function more() { return Math.max(1, Math.round((src.length - collapseText(src, PEEK_COLLAPSE).length) / 50)); }
+  put(!!all[key]);
+  var note = it.cut ? h("div", { "class": "cap cutnote", "data-k": "cutnote", text: PEEK_CUT_NOTE }) : null;
+  if (!long) return [mb, note];
+  var word = function (open) { return open ? "Show less" : "Show all · about " + more() + " more lines"; };
+  var btn = h("button", { "class": "btn link showall cmore", type: "button", "data-k": "showall", "aria-expanded": all[key] ? "true" : "false", text: word(!!all[key]) });
+  btn.addEventListener("click", function () {
+    var open = !all[key]; all[key] = open; put(open);
+    btn.textContent = word(open); btn.setAttribute("aria-expanded", open ? "true" : "false");
+    if (note) note.style.display = open ? "" : "none";
+  });
+  if (note && !all[key]) note.style.display = "none";
+  return [mb, btn, note];
+}
+/** One chat item as DOM. Text goes in only through text nodes (mdFill / textContent), never innerHTML. `it.sent` = a message sent from this phone that the log does not show yet, with its status words. `it.need` = the message the chat is waiting on (label, left marker, question box); `it.answered` = you answered it just now; `it.q` = its question. */
 function peekMsgNode(it) {
   if (it.kind === "tools") return h("div", { "class": "tool", text: it.text });
   var when = isFinite(it.at) ? hhmm(it.at) : "";
-  if (it.kind === "user") return h("div", { "class": "msg me" }, h("div", { "class": "who", text: "You" + (when ? " · " + when : "") }), h("div", { "class": "mb", text: it.text }));
-  var who = it.ask ? "Claude asks" + (isFinite(it.at) ? " · " + ago(it.at) : "") : "Claude" + (when ? " · " + when : "");
-  return h("div", { "class": "msg cl" + (it.ask ? " ask" : ""), "data-ask": it.ask ? "1" : null }, h("div", { "class": "who", text: who }), h("div", { "class": "mb", text: it.text }));
+  if (it.kind === "user") return h("div", { "class": "msg me" + (it.sent ? " pend" : ""), "data-k": it.sent ? "sent-msg" : null },
+    h("div", { "class": "ubub" }, peekBodyNodes(it)),
+    it.sent ? h("div", { "class": "ts sst" + (/^Sending/.test(it.sent) ? "" : /^Not delivered/.test(it.sent) ? " bad" : " ok"), "data-k": "sent-status", role: "status", text: (when ? when + " · " : "") + it.sent }) : (when ? h("div", { "class": "ts", text: when }) : null));
+  var boxed = (it.need || it.answered) && it.q, nodes = peekBodyNodes(it.q && boxed ? Object.assign({}, it, { body: dropQuestion(it.text, it.q) }) : it);
+  return h("div", { "class": "msg cl" + (it.ask ? " ask" : "") + (it.need ? " need" : ""), "data-ask": it.ask ? "1" : null },
+    it.need ? h("span", { "class": "lab", "data-k": "needlabel" }, h("i", { "aria-hidden": "true" }), "Needs your answer") : null,
+    it.summary ? h("div", { "class": "csum", "data-k": "summary" }, h("b", { text: "Summary. " }), document.createTextNode(it.summary)) : null,
+    nodes, h("div", { "class": "ts", text: (when ? when + " · " : "") + "Claude" }),
+    boxed ? h("div", { "class": "askbox" + (it.answered ? " done" : ""), "data-k": "askbox" }, h("div", { "class": "k", text: it.answered ? "You answered" : "The question" }), h("div", { "class": "aq", text: it.q })) : null);
 }
 /* ---------- review fixes (v7.1) ---------- */
 var PEEK_PAUSE_MS = 5 * 60000, PEEK_FRESH_MS = 30 * 60000, PEEK_KEEP = 10;
@@ -1207,7 +1417,7 @@ function toggleOne(cur, id) { return cur === id ? null : id; }
 function retryFields(r, machines) {
   if (!r || r.status !== "error" || r._foreign) return null;
   if (r.action === "send") return sendFields(r.sessionId, str(r.text), machines);
-  if (r.action === "archive") return archiveFields(r.sessionId, machines);
+  if (r.action === "archive") return archiveFields(r.sessionId, machines, r.confirm === true);
   if (r.action === "restore") return restoreFields(r.sessionId, r.target || r.machine || pickTarget(r.sessionId, machines));
   if (r.action === "start" && (r.kind === "plain" || r.kind === "research" || r.kind === "skill-install")) return Object.assign({ action: "start", target: r.target, title: str(r.title).slice(0, 80), prompt: str(r.prompt).slice(0, 4000), project: r.project ? str(r.project) : null, kind: r.kind, ttlSec: START_TTL_SEC }, FOLDER_ID_RE.test(str(r.folderId)) ? { folderId: str(r.folderId) } : {});
   return null;
@@ -1924,6 +2134,13 @@ function quickGate(mstat) {
   var ok = paired.filter(function (n) { return mstat[n].caps && mstat[n].caps.quick === true; });
   return ok.length ? { ok: true, target: ok[0], reason: "" } : { ok: false, target: "", reason: "needs Mac update" };
 }
+/** What archiving this chat costs, in the owner's words ("" when nothing special): a scheduled-task chat (the task keeps running) and / or a pinned chat (archiving unpins it). A running chat is never archivable. */
+function archiveCost(s) {
+  var p = [];
+  if (s && s.sched) p.push("It belongs to a scheduled task \u2014 the task will still run and start new chats.");
+  if (s && s.pinned) p.push("It\u2019s pinned \u2014 archiving unpins it.");
+  return p.join(" ");
+}
 /** The Archive list: done or stale chats only. Never running, pinned, waiting on you, unverified, on an offline computer, the Assistant or a /gn chat.
  *  Nor a scheduled task's chat (heartbeat `sched`). (Parents with a child that still needs you are not in the heartbeat: the Mac checks those before it archives, r3 R3.5.) Oldest first. */
 function archiveCandidates(byId, o) {
@@ -1931,7 +2148,7 @@ function archiveCandidates(byId, o) {
   Object.keys(byId || {}).forEach(function (id) {
     var s = byId[id];
     if (!s || s.unverified || !s.online || s.running || s.status === "running" || s.pinned || s.waitKind || s.waiting || needs[id]) return;
-    if (s.sched) return; // fix round 1: a scheduled task's chat (heartbeat `sched`) is never offered; the Mac refuses it anyway
+    if (s.sched) return; // a scheduled task's chat (heartbeat `sched`) is not SUGGESTED for a bulk archive (v17: it can be archived one at a time, after a confirm that names the cost)
     if ((o && o.assistantId && id === o.assistantId) || gn.indexOf(id) >= 0 || (o && o.pins && o.pins[id])) return;
     if (!/^local_[0-9a-f-]{36}$/.test(id)) return;
     out.push({ id: id, title: s.title, machine: s.machine, state: s.status === "stale" ? "Stale" : "Done", last: s.last });
@@ -1956,7 +2173,7 @@ function tickAll(sel, ids, max) {
 /** Ticked ids that are still in the list (a chat that left the list is never sent). */
 function tickedIds(sel, cands) { return (cands || []).map(function (c) { return c.id; }).filter(function (id) { return sel && sel[id]; }).slice(0, QA_MAX_TICK); }
 function archiveBtnText(n) { return "Archive " + n + " chat" + (n === 1 ? "" : "s"); }
-var QA_SKIP_WORDS = { "still working": "started working again", "tool error: still working": "started working again", "pinned session": "pinned", "tool error: pinned": "pinned", "scheduled task": "a scheduled task\u2019s chat", "gn session": "the /gn chat", "assistant session": "the Assistant", "child still active": "a chat it started may still need you", "parent of the bridge": "it started Mission Control\u2019s own chat", "archive check failed": "could not be checked", "not owned": "no longer listed", "tool error: open on screen": "open on the Mac\u2019s screen", "tool error: not approved": "not approved on the Mac", "timed out - may still complete": "no answer yet" };
+var QA_SKIP_WORDS = { "still working": "started working again", "tool error: still working": "started working again", "pinned session": "pinned (archive it alone)", "tool error: pinned": "pinned (archive it alone)", "scheduled task": "scheduled task (archive it alone)", "not unpinned": "could not be unpinned", "gn session": "the /gn chat", "assistant session": "the Assistant", "child still active": "a chat it started may still need you", "parent of the bridge": "it started Mission Control\u2019s own chat", "archive check failed": "could not be checked", "not owned": "no longer listed", "tool error: open on screen": "open on the Mac\u2019s screen", "tool error: not approved": "not approved on the Mac", "timed out - may still complete": "no answer yet" };
 function archiveSkipWord(err) { var t = str(err); return QA_SKIP_WORDS[t] || BRIDGE_ERRORS[t] || t || "not archived"; }
 /** What happened to one bulk archive: reqs = the app's request list, rids = { sessionId: requestId }. */
 function archiveOutcome(ids, rids, reqs) {
@@ -2024,7 +2241,8 @@ Object.assign(BRIDGE_ERRORS, {
   "folder unavailable": "That folder could not be opened on the Mac.",
   "restart needed": "Restart needed: that change needs /reload-plugins at the Mac. Nothing was changed.",
   "still working": "It started working again, so it was not archived.",
-  "scheduled task": "It belongs to a scheduled task, so it was not archived.",
+  "scheduled task": "It belongs to a scheduled task, so Tidy left it. Archive it on its own to confirm.",
+  "not unpinned": "The Mac could not unpin it, so it was not archived.",
   "gn session": "It is the /gn chat, so it was not archived.",
   "assistant session": "It is the Assistant, so it was not archived.",
   "child still active": "A chat it started may still need you, so it was not archived.",
@@ -2138,7 +2356,7 @@ function cleanTidy(t) {
     else if (kind === "archive" || kind === "leave") dest = { kind: kind };
     else return;
     seen[x.sessionId] = true;
-    out.items.push({ sessionId: x.sessionId, title: apStr(x.title, 120) || "Untitled session", reason: apStr(x.reason, 160), dest: dest });
+    out.items.push({ sessionId: x.sessionId, title: apStr(x.title, 120) || "Untitled session", reason: apStr(x.reason, 160), dest: dest, pinned: x.pinned === true });
   });
   (Array.isArray(t.groups) ? t.groups : []).slice(0, 30).forEach(function (g) {
     if (g && typeof g === "object" && QA_GROUP_ID_RE.test(str(g.id)) && !out.groups.some(function (x) { return x.id === g.id; })) out.groups.push({ id: g.id, name: apStr(g.name, 40) || g.id });
@@ -2161,7 +2379,7 @@ function tidyBuild(items, groups) {
   if ((items || []).length) sec("arch", "arch", "Archive");
   (items || []).forEach(function (x) {
     var d = x.dest, s = d.kind === "group" ? sec("group", "g:" + d.groupId, d.name, d.groupId) : d.kind === "new-group" ? sec("new", "n:" + d.name.toLowerCase(), d.name) : d.kind === "archive" ? sec("arch", "arch", "Archive") : sec("leave", "leave", "Leave as is");
-    s.rows.push({ sid: x.sessionId, title: x.title, why: x.reason, on: d.kind !== "leave" });
+    s.rows.push({ sid: x.sessionId, title: x.title, why: x.reason, on: d.kind !== "leave", pinned: x.pinned === true });
   });
   secs.forEach(function (s, i) { s.i = i; });
   secs.sort(function (a, b) { return (rank[a.kind] - rank[b.kind]) || (a.i - b.i); });
@@ -2202,10 +2420,10 @@ function tidyRename(T, secId, input) {
 function tidyTick(T, sid) { var at = tidyFind(T, sid); if (!at || at.sec.kind === "leave") return false; at.row.on = !at.row.on; T.dirty = true; return true; }
 /** The numbers in the sticky bar and the confirm sheet (mock): ticked chats going into groups, groups touched, new groups, ticked chats to archive. */
 function tidyCounts(T) {
-  var c = { g: 0, a: 0, gs: 0, ng: 0, names: [] };
+  var c = { g: 0, a: 0, gs: 0, ng: 0, names: [], unpin: 0 };
   T.secs.forEach(function (s) {
     var n = s.rows.filter(function (r) { return r.on; }).length;
-    if (s.kind === "group" || s.kind === "new") { c.g += n; if (n) { c.gs++; if (s.kind === "new") { c.ng++; c.names.push(s.name); } } }
+    if (s.kind === "group" || s.kind === "new") { c.unpin += s.rows.filter(function (r) { return r.on && r.pinned; }).length; c.g += n; if (n) { c.gs++; if (s.kind === "new") { c.ng++; c.names.push(s.name); } } }
     if (s.kind === "arch") c.a += n;
   });
   return c;
@@ -2216,7 +2434,7 @@ function tidyConfirmText(c) {
   var parts = [];
   if (c.g) parts.push("Move " + plural(c.g, "chat", "chats") + " into " + plural(c.gs, "group", "groups") + (c.ng ? ", create " + plural(c.ng, "group", "groups") + " (" + c.names.join(", ") + ")" : ""));
   if (c.a) parts.push("archive " + plural(c.a, "chat", "chats"));
-  var t = parts.join(", "); return t.charAt(0).toUpperCase() + t.slice(1) + ". Archive never deletes; Undo is on the next screen.";
+  var t = parts.join(", "); return t.charAt(0).toUpperCase() + t.slice(1) + "." + (c.unpin ? " This unpins " + plural(c.unpin, "pinned chat", "pinned chats") + " (a move into a group unpins it)." : "") + " Archive never deletes; Undo is on the next screen.";
 }
 /** Exactly the ticked chats, each with the card it sits in now. Leave as is never goes. [] when anything is not valid. */
 function tidyApplyItems(T) {
@@ -2692,8 +2910,7 @@ function archiveBlock(s) { // returns "" when a session may be archived
   if (!s.online) return s.machine + " offline";
   if (S.model && S.model.mstat[s.machine] && S.model.mstat[s.machine].youPaired === false) return "Pair this device first";
   if (s.running) return "Running";
-  if (s.pinned) return "Pinned";
-  return "";
+  return ""; // v17: a pinned chat and a scheduled-task chat CAN be archived, after a confirm that names the cost (archiveCost)
 }
 
 /* =====================================================================
@@ -2789,6 +3006,7 @@ async function doSend(s, text, queued, about, quiet) {
   if (r === undefined) return;
   if (r) {
     watchSend(r);
+    if (typeof sentAdd === "function" && s.id !== (S.assistInfo && S.assistInfo.id)) sentAdd(s.id, t, r); // v17: shown in the chat at once, with Sending / Delivered / Claude is working
     if (!queued) { S.drafts[s.id] = ""; var box = S.focus === s.id ? document.querySelector('[data-k="freply"]') : null; if (box) box.value = ""; }
     render(true); if (!quiet) toast("Reply requested. See Activity for what happened.");
   }
@@ -2800,12 +3018,13 @@ function focusReply(id) {
   var el = document.querySelector('[data-k="freply"]');
   if (el && !el.disabled && el.focus) el.focus();
 }
-async function doArchive(ids) {
+async function doArchive(ids, confirmed) {
   var n = 0, why = "", failed = false;
   for (var i = 0; i < ids.length; i++) {
     var id = ids[i], sx = S.byId[id], r = skipReason(sx, sx ? archiveBlock(sx) : "");
     if (r) { why = why || r; continue; }
-    var res = await guarded("archive:" + id, function () { return createRequest(archiveFields(id, S.machines)); });
+    var cf = !!(confirmed && confirmed[id] === true && archiveCost(sx)); // confirm travels only for a chat that really is pinned / scheduled, and only after the user said yes to its cost
+    var res = await guarded("archive:" + id, function () { return createRequest(archiveFields(id, S.machines, cf)); });
     if (res === undefined) why = why || "already being sent"; else if (res) n++; else failed = true;
   }
   if (!n && !failed && why === "already being sent") return; // a duplicate tap: the first call finishes the job
@@ -3448,6 +3667,30 @@ function checkSendWatch() {
   });
 }
 
+/** v17: remember a message just sent from this phone (a plain reply, or the answer on a yes screen) so the chat shows it at once with its status. */
+function sentAdd(sid, text, rid) {
+  var list = (S.sent[sid] || []).filter(function (e) { return Date.now() - e.at < SENT_KEEP_MS * 2; });
+  list.push({ text: str(text), at: Date.now(), rid: rid, repeeked: false });
+  S.sent[sid] = list.slice(-5);
+  S.peekLast[sid] = null; // look at the chat again as soon as the Mac says it is done (sentTick)
+}
+function sentEntries(sid) {
+  return (S.sent[sid] || []).map(function (e) { var x = reqState(e.rid); return { text: e.text, at: e.at, st: x.st === "done" ? "done" : x.st === "error" ? "error" : "sending" }; });
+}
+function sentFor(sid, view) { var s = S.byId[sid]; return sentItems(sentEntries(sid), view && view.status === "ok" ? view.items : [], !!(s && s.status === "running"), Date.now()); }
+/** Every tick: a message whose request just finished makes the open chat peek again at once (the 20 s timer is not waited for). */
+function sentTick() {
+  Object.keys(S.sent).forEach(function (sid) {
+    (S.sent[sid] || []).forEach(function (e) {
+      if (e.repeeked) return;
+      var x = reqState(e.rid);
+      if (x.st !== "done" && x.st !== "error") return;
+      e.repeeked = true; S.peekLast[sid] = null;
+      if (S.focus === sid) { peekTick(); renderFocus(); }
+    });
+  });
+}
+
 /* ---------- Assistant tab (contract v0.9): chat with the MC Assistant session via peek + send ---------- */
 function knownIds() { var m = Object.create(null); if (S.byId) Object.keys(S.byId).forEach(function (id) { m[id] = true; }); return m; }
 /** The assistant as a session object for the send/queue path (the heartbeat may not list it, or lists it pinned). */
@@ -3945,7 +4188,7 @@ function ingestRequests(docs) {
     p.then(function (verdict) {
       S.reqVer[k] = verdict;
       if (verdict === "ok" && r.action === "peek" && r.status === "done" && r.sessionId) { var at = Date.parse(r.createdAt); if (isFinite(at)) S.peekMin[r.sessionId] = Math.max(S.peekMin[r.sessionId] || 0, at); recheckPeeks(); }
-      normalizeRequests(); checkRefresh(); checkSendWatch(); checkReqWatch(); checkPairWatch(); render();
+      normalizeRequests(); checkRefresh(); checkSendWatch(); sentTick(); checkReqWatch(); checkPairWatch(); render();
     });
   });
 }
@@ -4657,6 +4900,7 @@ function openFocus(id) {
 }
 function closeFocus() {
   var id = S.focus; if (!id) return;
+  S.fmenu = null;
   var opener = S.focusOpener; S.focus = null; S.focusOpener = null;
   clearInterval(S.focusTimer); S.focusTimer = 0;
   if (peekUnsub) { try { peekUnsub(); } catch (e) {} peekUnsub = null; }
@@ -4701,8 +4945,13 @@ function grabHandlers(grab, sheet) { // swipe down on the grab bar to close; poi
   grab.addEventListener("lostpointercapture", function (e) { end(e, true); });
 }
 /** Choice pills for the chat sheet: only while the chat waits on you and its last message offers options. onPick(text) is the app's own "review and send" path: it never sends by itself. */
+/** The options a waiting message offers: read from its last paragraph first (the question itself), else from the whole message without its code blocks (a list inside code is not a choice). Nothing is cleaned first, so the hidden-character refusals in choicesFrom still see the raw text. */
+function chatChoices(text) {
+  var t = str(text).replace(/\r/g, ""), paras = t.replace(/\s+$/, "").split(/\n\s*\n/), o = paras.length > 1 ? choicesFrom(paras[paras.length - 1]) : [];
+  return o.length ? o : choicesFrom(t.replace(/^[ \t]*```[\s\S]*?^[ \t]*```[ \t]*$/gm, ""));
+}
 function chatPillsNode(s, view, now, canReply, onPick) {
-  var last = view && view.status === "ok" && view.items.length ? view.items[view.items.length - 1] : null, opts = canReply && last && last.kind === "assistant" && needsYou(s, view, now) ? choicesFrom(last.text) : [];
+  var last = view && view.status === "ok" && view.items.length ? view.items[view.items.length - 1] : null, opts = canReply && last && last.kind === "assistant" && needsYou(s, view, now) ? chatChoices(last.text) : [];
   if (!opts.length) return null;
   return h("div", { "class": "pills", role: "group", "aria-label": "Suggested answers (tap one, then confirm)", "data-k": "fpills" }, opts.map(function (o, i) { return h("button", { "class": "cpill", type: "button", "data-k": "fpill-" + i, onclick: function () { onPick(o); }, text: o }); }));
 }
@@ -4718,7 +4967,7 @@ function renderFocus() {
   var s = S.byId[id];
   if (!s) { closeFocus(); toast("That session is no longer listed."); return; }
   var now = Date.now(), view = S.peek[id] || null, st = peekState(view, S.focusOpenedAt, now, s.online), paused = peekPaused(S.focusActiveAt, now) && s.online && !s.pinned, gname = S.model && S.model.gmap[s.group] ? S.model.gmap[s.group].name : "";
-  var key = JSON.stringify([id, s.title, s.status, s.online, s.machine, s.pinned, st, view && [view.at, view.items.length, view.earlier, view.error, view.items.length ? view.items[view.items.length - 1].text.length : 0], !!S.busy["send:" + id], gname, Math.floor(s.last / 60000), paused, peekAsks(view, now), isWide(), s.status]);
+  var key = JSON.stringify([id, s.title, s.status, s.online, s.machine, s.pinned, st, view && [view.at, view.items.length, view.earlier, view.error, view.items.length ? view.items[view.items.length - 1].text.length : 0], !!S.busy["send:" + id], gname, Math.floor(s.last / 60000), paused, peekAsks(view, now), isWide(), s.status, sentFor(id, view).map(function (x) { return x.text.length + x.sent; }), Object.keys(S.showAll).length, S.fmenu === id, !!(S.moreRep && S.moreRep[id])]);
   var ageEl = $("fAge");
   if (host.getAttribute("data-key") === key && ageEl) { if (!paused) ageEl.textContent = view ? peekAgeText(view.at, now) : ""; return; }
   var opening = !host.firstChild, oldLog = host.querySelector(".log"), ae = document.activeElement;
@@ -4728,25 +4977,38 @@ function renderFocus() {
   var meta = sessionMeta(s, S.now, view), busy = !!S.busy["send:" + id], docked = isWide();
   var openA = CAN_OPEN_CLAUDE && SESSION_ID_RE.test(id) ? h("a", { "class": "btn", href: "claude://claude.ai/epitaxy/" + id, text: "Open on " + s.machine }) : null;
   var blocked = archiveBlock(s);
+  var menuOn = S.fmenu === id, closeMenu = function () { S.fmenu = null; renderFocus(); };
+  var mItems = [openA ? h("a", { "class": "fmi", role: "menuitem", href: "claude://claude.ai/epitaxy/" + id, text: "Open on " + s.machine }) : null,
+    SESSION_ID_RE.test(id) ? h("button", { "class": "fmi", type: "button", role: "menuitem", "data-k": "fask", onclick: function () { S.fmenu = null; goAsk(id); }, text: "Ask Assistant" }) : null,
+    h("button", { "class": "fmi risk", type: "button", role: "menuitem", "data-k": "farch", disabled: blocked ? "" : null, title: blocked || null, onclick: function () { S.fmenu = null; closeFocus(); askArchiveMany(s.title, [s]); }, text: "Archive" })];
   var head = h("div", { "class": "fhead" },
+    h("button", { "class": "ib", type: "button", "data-k": "fclose", "aria-label": "Back to sessions", onclick: closeFocus }, icon("back", 22)),
     h("div", { "class": "tx" }, h("h2", { id: "ft", tabindex: "-1", text: s.title }),
-      h("div", { "class": "cap" }, h("span", { "class": "dot " + (meta.cls === "run" ? "run" : meta.cls === "stale" ? "stale" : meta.cls === "wait" ? "wait" : ""), "aria-hidden": "true" }), h("b", { "class": meta.cls === "wait" ? "waitw" : "", text: meta.word }), h("span", { text: "\u00b7 " + (gname ? gname + " \u00b7 " : "") + (isFinite(s.last) ? ago(s.last) : "no activity") })),
-      paused ? h("button", { "class": "btn link", type: "button", id: "fAge", "data-k": "fresume", onclick: function () { S.focusActiveAt = Date.now(); S.peekLast[id] = null; peekTick(); renderFocus(); }, text: "Paused \u00b7 tap to refresh" })
-        : h("div", { "class": "cap", id: "fAge", "aria-live": "off", text: view ? peekAgeText(view.at, now) : "" })),
-    h("button", { "class": "btn round", type: "button", "data-k": "fclose", "aria-label": "Close", onclick: closeFocus }, icon("close", 14)));
-  var acts = h("div", { "class": "facts" }, openA, SESSION_ID_RE.test(id) ? h("button", { "class": "btn", type: "button", "data-k": "fask", onclick: function () { goAsk(id); }, text: "Ask Assistant" }) : null,
-    h("button", { "class": "btn", type: "button", "data-k": "farch", disabled: blocked ? "" : null, title: blocked || null, onclick: function () { closeFocus(); askArchiveMany(s.title, [s]); }, text: "Archive" }));
+      h("div", { "class": "cap" }, h("span", { "class": "dot " + (meta.cls === "run" ? "run" : meta.cls === "stale" ? "stale" : meta.cls === "wait" ? "wait" : ""), "aria-hidden": "true" }), h("b", { "class": meta.cls === "wait" ? "waitw" : "", text: meta.word }), h("span", { text: "· " + (gname ? gname + " · " : s.machine + " · ") + (isFinite(s.last) ? ago(s.last) : "no activity") })),
+      paused ? h("button", { "class": "btn link", type: "button", id: "fAge", "data-k": "fresume", onclick: function () { S.focusActiveAt = Date.now(); S.peekLast[id] = null; peekTick(); renderFocus(); }, text: "Paused · tap to refresh" })
+        : h("div", { "class": "cap age", id: "fAge", "aria-live": "off", text: view ? peekAgeText(view.at, now) : "" })),
+    h("button", { "class": "ib", type: "button", "data-k": "fmenu", "aria-label": "More options", "aria-haspopup": "menu", "aria-expanded": menuOn ? "true" : "false", onclick: function () { S.fmenu = menuOn ? null : id; renderFocus(); } }, icon("more", 22)));
+  var menu = menuOn ? [h("button", { "class": "fmscrim", type: "button", "aria-hidden": "true", tabindex: "-1", onclick: closeMenu }), h("div", { "class": "fmenu", role: "menu", "data-k": "fmenulist" }, mItems)] : null;
+  var askNode = null;
   var log = h("div", { "class": "log" + (view && view.verified === false ? " unv" : ""), role: "log", tabindex: "0", "aria-label": "Latest messages, newest at the bottom", "aria-live": "off" });
   var link = function (t) { return CAN_OPEN_CLAUDE && SESSION_ID_RE.test(id) ? h("a", { href: "claude://claude.ai/epitaxy/" + id, text: t }) : null; };
   if (st === "ok") {
     if (view.verified === false) log.appendChild(h("div", { "class": "cap", style: "text-align:center", text: "Unverified: this log isn\u2019t proven to come from your Mac." }));
     if (view.earlier > 0) log.appendChild(CAN_OPEN_CLAUDE && SESSION_ID_RE.test(id) ? h("a", { "class": "earlier", href: "claude://claude.ai/epitaxy/" + id, text: plural(view.earlier, "earlier message", "earlier messages") + " \u00b7 Open on " + s.machine }) : h("div", { "class": "cap", text: plural(view.earlier, "earlier message", "earlier messages") }));
-    view.items.forEach(function (it) { log.appendChild(peekMsgNode(it)); });
-  } else if (st === "loading") log.appendChild(h("div", { "class": "pstate", text: s.online ? "Loading the latest messages\u2026" : s.machine + " is offline, so its log can\u2019t be read right now." }));
+    var lastI = view.items.length - 1, needNow = needsYou(s, view, now), sentNow = sentFor(id, view), answered = sentNow.length > 0, prevDay = "";
+    view.items.forEach(function (it, ix) {
+      var dl = dayLabel(it.at, now); if (dl && dl !== prevDay) { prevDay = dl; log.appendChild(h("div", { "class": "day", text: dl })); }
+      var cur = ix === lastI && it.kind === "assistant" && it.ask ? Object.assign({}, it, { need: needNow && !answered, answered: answered, q: questionOf(it.text, s.ask) }) : it, nd = peekMsgNode(cur);
+      if (cur.need) askNode = nd;
+      log.appendChild(nd);
+    });
+  } else if (st === "loading" && s.online) log.appendChild(h("div", { "class": "sk", role: "status", "aria-busy": "true", "aria-label": "Loading the latest messages" }, h("i", { "class": "ub" }), h("i", { style: "width:92%" }), h("i", { style: "width:78%" }), h("i", { style: "width:85%" }), h("i", { style: "width:40%" }), h("i", { "class": "ub", style: "margin-top:14px;width:45%" }), h("i", { style: "width:88%" }), h("i", { style: "width:70%" })));
+  else if (st === "loading") log.appendChild(h("div", { "class": "pstate", text: s.machine + " is offline, so its log can\u2019t be read right now." }));
   else if (st === "offline") log.appendChild(h("div", { "class": "pstate" }, s.machine + " is offline, so its log can\u2019t be read right now.", h("br"), link("Open on " + s.machine)));
   else if (st === "nolog") log.appendChild(h("div", { "class": "pstate" }, PEEK_NOLOG_TEXT, h("br"), link("Open on " + s.machine)));
   else if (st === "error") log.appendChild(h("div", { "class": "pstate" }, "Couldn\u2019t read the log" + (view.error ? ": " + view.error : "."), h("br"), link("Open on " + s.machine)));
   else log.appendChild(h("div", { "class": "pstate", text: "No messages to show yet." }));
+  sentFor(id, view).forEach(function (it) { log.appendChild(peekMsgNode(it)); }); // v17: what you just sent, with its status, until the log shows it
   var unp = !!(s.unverified || (S.model && S.model.mstat[s.machine] && S.model.mstat[s.machine].youPaired === false));
   var inp = h("input", { type: "text", "data-k": "freply", maxlength: 4000, enterkeyhint: "send", autocomplete: "off", placeholder: s.online ? "Write a reply\u2026" : s.machine + " is offline", "aria-label": "Your reply to " + s.title, value: S.drafts[id] || "", disabled: !s.online || busy || unp ? "" : null });
   inp.addEventListener("input", function () { S.drafts[id] = inp.value; });
@@ -4756,11 +5018,16 @@ function renderFocus() {
   var chips = chatChipsNode(s, s.online && !busy && !unp && peekAsks(view, now), function (t) { inp.value = t; S.drafts[id] = t; });
   /* v15 choice pills: when the chat waits on you and its last message offers options, each option is a suggestion. A tap only fills the reply and opens the SAME confirm (the hash-bound yes screen for a gated chat); nothing is sent by the tap itself. */
   var pills = chatPillsNode(s, view, now, s.online && !busy && !unp, function (o) { inp.value = o; S.drafts[id] = o; askSend(s, o); });
-  var comp = h("div", { "class": "fcomp" }, pills, chips, h("div", { "class": "rr" }, inp, sendBtn), h("div", { "class": "cap", text: s.unverified ? "Unverified data from the Mac: replying is off." : unp ? "Pair this device first to reply." : s.online ? (s.status === "running" ? "Claude is working. A reply is read after its current step." : "You\u2019ll see exactly what gets sent before it goes.") : s.machine + " is offline. Replies come back when it reconnects." }));
+  var moreOn = !!(S.moreRep && S.moreRep[id]);
+  if (askNode && (pills || chips)) { // the real options first, the fixed replies behind "More replies"
+    if (pills) askNode.appendChild(pills);
+    if (chips) askNode.appendChild(h("div", { "class": "mr" }, h("button", { "class": "cmore", type: "button", "data-k": "fmore", "aria-expanded": moreOn ? "true" : "false", onclick: function () { S.moreRep = S.moreRep || Object.create(null); S.moreRep[id] = !moreOn; renderFocus(); }, text: "More replies" + (moreOn ? " \u25b4" : " \u25be") }), moreOn ? chips : null));
+  }
+  var comp = h("div", { "class": "fcomp" }, h("div", { "class": "rr" }, inp, sendBtn), h("div", { "class": "cap", text: s.unverified ? "Unverified data from the Mac: replying is off." : unp ? "Pair this device first to reply." : s.online ? (s.status === "running" ? "Claude is working. A reply is read after its current step." : "You\u2019ll see exactly what gets sent before it goes.") : s.machine + " is offline. Replies come back when it reconnects." }));
   var grab = h("div", { "class": "fgrab", "aria-hidden": "true" }, h("i"));
-  var sheet = h("section", { "class": "fsheet" + (docked ? " docked" : ""), role: "dialog", "aria-modal": docked ? null : "true", "aria-labelledby": "ft" }, grab, head, acts, log, comp);
+  var sheet = h("section", { "class": "fsheet cv" + (docked ? " docked" : ""), role: "dialog", "aria-modal": docked ? null : "true", "aria-labelledby": "ft" }, grab, head, log, comp, menu);
   grabHandlers(grab, sheet);
-  sheet.addEventListener("keydown", function (e) { if (!docked) trapTab(e, sheet); });
+  sheet.addEventListener("keydown", function (e) { if (e.key === "Escape" && S.fmenu === id) { S.fmenu = null; renderFocus(); return; } if (!docked) trapTab(e, sheet); });
   ["pointerdown", "keydown", "input"].forEach(function (t) { sheet.addEventListener(t, function () { if (peekPaused(S.focusActiveAt, Date.now())) { S.focusActiveAt = Date.now(); S.peekLast[id] = null; } else S.focusActiveAt = Date.now(); }); }); // any touch counts as being here; waking from a pause refreshes at once
   if (!docked) host.appendChild(h("button", { "class": "fscrim", type: "button", "aria-hidden": "true", tabindex: "-1", onclick: closeFocus }));
   host.appendChild(sheet);
@@ -5577,6 +5844,7 @@ async function rfDoGated(d) {
     var rid = await rfSend(f, { id: d.id, onFail: function () { delete S.rf.local[d.id]; }, onDone: function () { toast("Claude has it ready. You do the last step."); } });
     if (!rid) delete S.rf.local[d.id]; else toast(ga ? "Sent your answer." : "Sent. Claude gets it ready; you do the last step.");
     if (rid && ga && ga.answer !== undefined && d.sessionId) { if (S.drafts[d.sessionId] === ga.answer) S.drafts[d.sessionId] = ""; if (S.qa.drafts[d.sessionId] === ga.answer) S.qa.drafts[d.sessionId] = ""; } // the draft goes only once the answer is on its way
+    if (rid && ga && ga.answer !== undefined && d.sessionId && S.byId && S.byId[d.sessionId] && typeof sentAdd === "function") { sentAdd(d.sessionId, ga.answer, rid); if (S.focus !== d.sessionId) openFocus(d.sessionId); } // v17: after the yes the chat opens again with your answer and its status, not nothing
   } catch (e) { toast("Couldn’t build the yes, so nothing was sent."); }
   finally { S.rf.gateBusy = false; render(true); renderDec(); }
 }
@@ -6563,16 +6831,30 @@ function makeDraggable(handle, target, o) {
 }
 /** Archive with a 5 s Undo: the request is held here and only written when the time is up. Closing the page inside those 5 s cancels it. */
 var UNDO_MS = 5000;
-function commitUndo(u) { if (S.undo !== u) return; clearTimeout(u.t); S.undo = null; doArchive(u.ids); }
+function commitUndo(u) { if (S.undo !== u) return; clearTimeout(u.t); S.undo = null; doArchive(u.ids, u.confirm); }
 function askArchiveMany(label, sessions) {
   var sp = splitArchive(sessions, archiveBlock, MAX_BULK);
   if (!sp.use.length) {
-    var why = sessions.length === 1 ? archiveBlock(sessions[0]) : "all are running, pinned or on an offline computer";
+    var why = sessions.length === 1 ? archiveBlock(sessions[0]) : "all are running or on an offline computer";
     toast("Nothing archived: \u201c" + label + "\u201d cannot be archived (" + why + ").");
     return;
   }
+  // v17: a pinned chat or a scheduled-task chat is archived only after a confirm that names what it costs; the yes is signed into the request (confirm: true)
+  var costly = sp.use.filter(function (x) { return !!archiveCost(x); });
+  if (costly.length) {
+    var many = sp.use.length > 1, body = costly.length === 1 && !many ? archiveCost(costly[0]) : costly.map(function (x) { return "\u201c" + x.title + "\u201d: " + archiveCost(x); }).join("\n");
+    S.ask = { title: many ? "Archive " + sp.use.length + " sessions?" : "Archive this session?", okLabel: "Archive", cancelLabel: "Not now", sheet: true, top: true, danger: true,
+      body: (many ? "" : "\u201c" + label + "\u201d. ") + body + "\nNothing is deleted: you can undo for 5 seconds, and restore it from Archive later.", keyExtra: "archive-cost|" + sp.use.map(function (x) { return x.id; }).join(","),
+      ok: function () { startArchiveUndo(label, sp, true); } };
+    renderDialog();
+    return;
+  }
+  startArchiveUndo(label, sp, false);
+}
+function startArchiveUndo(label, sp, confirmed) {
   if (S.undo) commitUndo(S.undo); // an earlier one still waiting goes through now
-  var u = { ids: sp.use.map(function (x) { return x.id; }), t: 0 };
+  var u = { ids: sp.use.map(function (x) { return x.id; }), t: 0, confirm: Object.create(null) };
+  if (confirmed) sp.use.forEach(function (x) { if (archiveCost(x)) u.confirm[x.id] = true; });
   u.t = setTimeout(function () { commitUndo(u); }, UNDO_MS);
   S.undo = u;
   var msg = "Archiving \u201c" + label + "\u201d" + (sp.use.length > 1 ? " (" + sp.use.length + " sessions)" : "") + (sp.kept ? ", " + sp.kept + " kept" : "") + (sp.extra ? ", first " + MAX_BULK + " only" : "") + "\u2026";
@@ -6640,7 +6922,7 @@ function init() {
   window.addEventListener("pageshow", wakeDb);
   window.addEventListener("online", wakeDb);
   setInterval(assistTick, 1000);
-  setInterval(function () { checkRefresh(); checkSendWatch(); checkReqWatch(); checkPairWatch(); render(); autoRefresh(300000); }, 5000); // re-check online / offline (30 s rule) and ages
+  setInterval(function () { checkRefresh(); checkSendWatch(); sentTick(); checkReqWatch(); checkPairWatch(); render(); autoRefresh(300000); }, 5000); // re-check online / offline (30 s rule) and ages
   watchSheets();
   render(true);
   connect();
