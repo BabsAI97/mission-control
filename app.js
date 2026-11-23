@@ -30,7 +30,7 @@ var S = {
   menuOpen: false, menuFocus: "", focus: null, focusOpenedAt: 0, focusOpener: null, peek: Object.create(null), peekReq: Object.create(null), peekLast: Object.create(null), focusFocus: false,
   zoom: 1, panX: 0, panY: 0,
   drafts: Object.create(null), reqErr: "", unknown: Object.create(null), pairUI: null, relayReadyAt: 0, reqSnapAt: 0, focusTimer: 0, lastRefreshAt: 0, focusActiveAt: 0, undo: null,
-  ask: null, actOpen: false, savesOpen: false, saveSel: null, saveFocus: null, bannerOff: NaN, toastMsg: "",
+  sk: { done: Object.create(null) }, ask: null, actOpen: false, savesOpen: false, saveSel: null, saveFocus: null, bannerOff: NaN, toastMsg: "",
   dragging: false, dirty: false, pinching: false, suppressUntil: 0, lastSig: "",
   rf: { order: "effort", sheet: null, opener: null, local: Object.create(null), undone: Object.create(null), hold: Object.create(null), reqs: Object.create(null), vals: Object.create(null), checks: Object.create(null), askPend: Object.create(null), jobAsks: Object.create(null), overlay: Object.create(null), saveSt: Object.create(null), snz: false, confirm: "", gate: "", gateAns: null, gateSel: Object.create(null), gateBusy: false, deep: "", badge: -1, pageAt: Date.now(), sessMode: "home", saveFilter: "all", showNames: false, push: { sub: null, busy: false }, stack: { all: false, seen: Object.create(null), busy: Object.create(null), last: null } },
   tab: "decide", filter: "all", query: "", pins: Object.create(null), readAt: Object.create(null), readBase: NaN, queue: [], qTimer: 0, sendWatch: Object.create(null), reqWatch: Object.create(null),
@@ -109,6 +109,7 @@ var BRIDGE_ERRORS = Object.assign(Object.create(null), {
 function friendlyError(action, out) {
   var t = str(out), bare = t.replace(/^tool error:\s*/i, "");
   if (action === "archive") { var ae = ARCHIVE_ERRORS[bare.toLowerCase()]; if (ae) return ae; } // L-round 11: one plain sentence per archive refusal code
+  if (action === "skill-verdict") { var se = SKILL_ERRORS[bare.toLowerCase()]; if (se) return se; }
   var plain = rfRefusal(action, t); // refocus: one plain sentence per refusal, never a raw code
   if (plain) return plain;
   if (BRIDGE_ERRORS[t]) return BRIDGE_ERRORS[t];
@@ -650,7 +651,7 @@ function listTargets(machines, now, onlineMs) {
 /** The fields of each request the page creates (contract v0.3.5): send/archive are targeted at the computer that lists the session; send carries a 5 min ttl; Refresh = one targeted list per online computer, or one untargeted list when none is online. */
 function sendFields(sid, text, machines, about, target) { var f = { action: "send", sessionId: sid, text: text, target: target || pickTarget(sid, machines), ttlSec: SEND_TTL_SEC }; if (about) f.about = about; return f; }
 /** ttlSec for every action the app creates (contract v0.7.2: 60-300). */
-var REQ_TTL = { send: 300, peek: 60, list: 60, archive: 120, restore: 120, start: 300, "agent-save": 300, "agent-run": 300, "agent-toggle": 300, "agent-delete": 300, "research-now": 300, unpair: 120, "pair-start": 120, pair: 120, answer: 120, "reload-config": 60, "away-set": 120, "perm-answer": 120, "q-answer": 120, "keep-awake": 120, "tidy-refresh": 60, "tidy-apply": 300, "tidy-undo": 120, "decision-answer": 120, "decision-snooze": 120, "decision-dismiss": 120, "decision-undo": 120, "decision-ask": 120, "decision-doit": 120, "job-approve": 120, "job-skip": 120, "job-restore": 120, "push-subscribe": 120, "push-unsubscribe": 120 };
+var REQ_TTL = { send: 300, peek: 60, list: 60, archive: 120, restore: 120, start: 300, "agent-save": 300, "agent-run": 300, "agent-toggle": 300, "agent-delete": 300, "research-now": 300, unpair: 120, "pair-start": 120, pair: 120, answer: 120, "reload-config": 60, "away-set": 120, "perm-answer": 120, "q-answer": 120, "keep-awake": 120, "tidy-refresh": 60, "tidy-apply": 300, "tidy-undo": 120, "skill-verdict": 120, "decision-answer": 120, "decision-snooze": 120, "decision-dismiss": 120, "decision-undo": 120, "decision-ask": 120, "decision-doit": 120, "job-approve": 120, "job-skip": 120, "job-restore": 120, "push-subscribe": 120, "push-unsubscribe": 120 };
 function archiveFields(sid, machines) { return { action: "archive", sessionId: sid, target: pickTarget(sid, machines) }; }
 function refreshFields(machines, now, onlineMs) {
   var ts = listTargets(machines, now, onlineMs);
@@ -679,6 +680,7 @@ function requestBody(f, id, iso) {
   if (f.action === "q-answer") { body.itemId = f.itemId; body.inputHash = f.inputHash; if (f.answers !== undefined) body.answers = f.answers.slice(); else body.answer = f.answer; if (f.other === true) body.other = true; }
   if (f.action === "tidy-apply") body.items = (f.items || []).map(function (i) { return { sessionId: i.sessionId, dest: Object.assign({}, i.dest) }; });
   if (f.action === "tidy-undo") body.applyId = f.applyId;
+  if (f.action === "skill-verdict") { body.skillId = f.skillId; body.verdict = f.verdict; }
   // refocus: only the fields the contract names (5e), never anything else the caller happened to carry
   if (f.action === "decision-answer") { body.decisionId = f.decisionId; if (f.stepsDone === true) body.stepsDone = true; else if (f.answers !== undefined) body.answers = f.answers.slice(); else body.answer = f.answer; if (f.actionHash) body.actionHash = f.actionHash; }
   if (f.action === "decision-snooze") { body.decisionId = f.decisionId; body.until = f.until; }
@@ -710,7 +712,7 @@ function derive() {
     if (m) { t = Date.parse(m.lastSeen); online = !isNaN(t) && (S.now - t) < ONLINE_MS; }
     var verified = !S.sig || S.sig["machines/" + n] === "ok", heldKey = !!(typeof DEV !== "undefined" && DEV.macKeys && DEV.macKeys[n]), mine = m && (verified || heldKey) ? mapSessions(m.sessions, n, online, S.now, S.titles, !verified) : [];
     mstat[n] = { exists: !!m, online: online, lastSeen: t, version: m ? str(m.version) : "", bridgeVersion: verified && m && /^\d{1,6}\.\d{1,6}\.\d{1,6}$/.test(str(m.bridgeVersion)) ? m.bridgeVersion : "", mode: m ? str(m.mode) : "", pairing: m && m.pairing === "paired" ? "paired" : "none", total: m && isFinite(Number(m.total)) ? Number(m.total) : null,
-      pairLocked: !!m && m.pairLocked === true, devicePaired: false, verified: verified, sigState: (S.sig && S.sig["machines/" + n]) || "pending", usage: m && verified ? cleanUsage(m.usage) : null, caps: cleanCaps(m && m.caps), folders: verified ? cleanFolders(m && m.folders) : [], startLimit: cleanStartLimit(verified && m ? m.startLimit : null), startReason: verified && m && m.startReason === "not enabled" ? "starting is off on the Mac" : "", assistant: cleanAssistant(m && m.assistant), devices: verified ? cleanDevices(m && m.devices) : [], quotaWarn: verified ? cleanQuotaWarn(m && m.quotaWarn) : "", saved: verified ? cleanSaved(m && m.saved) : [], away: verified ? cleanAway(m && m.away) : cleanAway(null), keepAwake: verified ? cleanKeepAwake(m && m.keepAwake) : cleanKeepAwake(null), pending: verified ? cleanPending(m && m.pending) : [], rf: verified ? cleanRefocus(m, n) : cleanRefocus(null, n), tidy: verified ? cleanTidy(m && m.tidy) : cleanTidy(null), configLoadedAt: verified && m ? str(m.configLoadedAt).slice(0, 40) : "", lastError: m ? str(m.lastError) : "", lastErrorAt: m ? Date.parse(m.lastErrorAt) : NaN, shown: mine.length };
+      pairLocked: !!m && m.pairLocked === true, devicePaired: false, verified: verified, sigState: (S.sig && S.sig["machines/" + n]) || "pending", usage: m && verified ? cleanUsage(m.usage) : null, caps: cleanCaps(m && m.caps), folders: verified ? cleanFolders(m && m.folders) : [], startLimit: cleanStartLimit(verified && m ? m.startLimit : null), startReason: verified && m && m.startReason === "not enabled" ? "starting is off on the Mac" : "", assistant: cleanAssistant(m && m.assistant), devices: verified ? cleanDevices(m && m.devices) : [], quotaWarn: verified ? cleanQuotaWarn(m && m.quotaWarn) : "", saved: verified ? cleanSaved(m && m.saved) : [], away: verified ? cleanAway(m && m.away) : cleanAway(null), keepAwake: verified ? cleanKeepAwake(m && m.keepAwake) : cleanKeepAwake(null), pending: verified ? cleanPending(m && m.pending) : [], rf: verified ? cleanRefocus(m, n) : cleanRefocus(null, n), tidy: verified ? cleanTidy(m && m.tidy) : cleanTidy(null), skills: verified ? cleanSkills(m && m.skills) : [], configLoadedAt: verified && m ? str(m.configLoadedAt).slice(0, 40) : "", lastError: m ? str(m.lastError) : "", lastErrorAt: m ? Date.parse(m.lastErrorAt) : NaN, shown: mine.length };
     if (!m) return;
     buildTree(m.tree, tree);
     mine.forEach(function (x) { sessions.push(x); });
@@ -1232,7 +1234,7 @@ function retryGate(r, mstat, machines, listed) {
 /** Labelled lines for an expanded Activity row and for "Copy details". */
 function activityDetails(r, sessionTitle) {
   if (r._foreign) return [["What", "Request details not verified"], ["Status", str(r.status)]].concat([["Created", r.createdAt], ["Done", r.doneAt]].map(function (p) { var t = Date.parse(p[1]); return isFinite(t) ? [p[0], dayMonth(t) + " " + hhmm(t)] : null; }).filter(Boolean));
-  var out = [["What", ({ send: "Reply", archive: "Archive", list: "Refresh", peek: "Peek", start: "Start session", restore: "Restore", "agent-save": "Save agent", "agent-run": "Run agent", "agent-toggle": "Agent on/off", "research-now": "Research", pair: "Pair device", unpair: "Remove device", "away-set": "Away mode", "perm-answer": "Permission answer", "q-answer": "Question answer", "keep-awake": "Keep awake", "tidy-refresh": "Tidy refresh", "tidy-apply": "Tidy", "tidy-undo": "Undo Tidy" })[r.action] || str(r.action)], ["Status", str(r.status)]];
+  var out = [["What", ({ send: "Reply", archive: "Archive", list: "Refresh", peek: "Peek", start: "Start session", restore: "Restore", "agent-save": "Save agent", "agent-run": "Run agent", "agent-toggle": "Agent on/off", "research-now": "Research", pair: "Pair device", unpair: "Remove device", "away-set": "Away mode", "perm-answer": "Permission answer", "q-answer": "Question answer", "keep-awake": "Keep awake", "tidy-refresh": "Tidy refresh", "tidy-apply": "Tidy", "tidy-undo": "Undo Tidy", "skill-verdict": "Skill suggestion" })[r.action] || str(r.action)], ["Status", str(r.status)]];
   if (sessionTitle) out.push(["Session", sessionTitle]);
   if (r.action === "start" && r.title) out.push(["Title", str(r.title)]);
   if (r.action === "start" && FOLDER_ID_RE.test(str(r.folderId))) out.push(["Folder", str(r.folderId) === "home" ? "Home folder" : str(r.folderId) === "kb" ? "KnowledgeBase" : str(r.folderId).slice(3)]);
@@ -1862,6 +1864,38 @@ function cleanStartLimit(x) {
   var max = x && typeof x === "object" ? Math.floor(Number(x.max)) : NaN, mins = x && typeof x === "object" ? Math.floor(Number(x.minutes)) : NaN;
   return { max: max >= 1 && max <= 99 ? max : 5, minutes: mins >= 1 && mins <= 120 ? mins : 10 };
 }
+/* v0.12.5 Suggested skills to learn: the Mac publishes the radar's NEW suggestions in the heartbeat (`skills.items`); the page cleans them again, whatever the Mac said. */
+var SKILL_ID_RE = /^(?:tiktok|youtube):[A-Za-z0-9._-]{1,60}$/, SKILLS_MAX = 20, SKILL_HOSTS = ["tiktok.com", "www.tiktok.com", "youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be"];
+/** An https link on tiktok.com / youtube.com / youtu.be (no user, no port), else "". */
+function skillLink(u) {
+  var t = str(u).trim(); if (!t || t.length > 300 || !/^https:\/\//i.test(t)) return "";
+  try { var p = new URL(t); return p.protocol === "https:" && !p.username && !p.password && !p.port && SKILL_HOSTS.indexOf(p.hostname.toLowerCase()) >= 0 ? p.href : ""; } catch (e) { return ""; }
+}
+function cleanSkills(sk) {
+  var list = sk && typeof sk === "object" && Array.isArray(sk.items) ? sk.items : [], out = [], seen = Object.create(null);
+  list.slice(0, 60).forEach(function (x) {
+    if (out.length >= SKILLS_MAX || !x || typeof x !== "object" || !SKILL_ID_RE.test(str(x.id)) || seen[x.id]) return;
+    var plat = x.platform === "TikTok" || x.platform === "YouTube" ? x.platform : "", handle = apStr(x.handle, 40), verdict = x.verdict === "suggest" || x.verdict === "maybe" ? x.verdict : "";
+    if (!plat || !handle || !verdict) return;
+    var sc = Math.round(Number(x.score)), sv = Math.round(Number(x.saves));
+    seen[x.id] = true;
+    out.push({ id: x.id, handle: handle, platform: plat, verdict: verdict, score: isFinite(sc) ? Math.min(5, Math.max(0, sc)) : 0, saves: isFinite(sv) ? Math.min(9999, Math.max(0, sv)) : 0, why: apStr(x.why, 160), link: skillLink(x.link) });
+  });
+  return out;
+}
+/** Plain sentences for the Mac's skill-verdict refusals (looked up lower-case, with any "tool error:" prefix removed). */
+var SKILL_ERRORS = Object.assign(Object.create(null), {
+  "not-found": "That suggestion is no longer on the Mac\u2019s list. It will disappear on the next refresh.",
+  "ambiguous": "The note lists that creator twice, so nothing was changed. Fix the note on the Mac.",
+  "already-done": "That one was already decided. It will disappear on the next refresh.",
+  "changed-file": "The note changed while the Mac was writing, so nothing was saved. Try again.",
+  "skills-unavailable": "The Mac couldn\u2019t read or write the suggestions note, so nothing was saved.",
+  "bad-request": "The Mac refused that request, so nothing was changed.",
+  "needs pairing": "Pair this device first.",
+  "replayed request": "That request had already been used. Press the button again.",
+  "unpaired device": "Pair this device again to control your Mac.",
+  "expired": "That request expired before the Mac saw it. Try again."
+});
 function startLimitText(x) { var l = cleanStartLimit(x); return "Up to " + l.max + " starts in any " + l.minutes + " minutes."; }
 /** The Folder <select> of a start sheet. With the Mac's folder list: Default (home), KnowledgeBase, ClaudeSync folders, and the last choice on this phone when it is still listed.
  *  Without a list (older Mac): the old Project picker. */
@@ -2064,6 +2098,7 @@ function awayFields(on, minutes, target) { return { action: "away-set", on: on =
 function keepAwakeFields(on, target) { return { action: "keep-awake", on: on === true, target: target, ttlSec: 120 }; }
 function tidyRefreshFields(target) { return { action: "tidy-refresh", target: target, ttlSec: 60 }; }
 function tidyApplyFields(items, target) { return { action: "tidy-apply", items: items, target: target, ttlSec: 300 }; }
+function skillVerdictFields(skillId, verdict, target) { return { action: "skill-verdict", skillId: skillId, verdict: verdict, target: target, ttlSec: 120 }; }
 function tidyUndoFields(applyId, target) { return { action: "tidy-undo", applyId: applyId, target: target, ttlSec: 120 }; }
 function tidyDestOk(d) {
   if (!d || typeof d !== "object") return false;
@@ -2072,7 +2107,7 @@ function tidyDestOk(d) {
   return d.kind === "archive";
 }
 /** "" when an r4 request is well formed, else why not. createRequest refuses to send anything this says no to. */
-var R4_ACTIONS = ["away-set", "keep-awake", "perm-answer", "q-answer", "tidy-refresh", "tidy-apply", "tidy-undo"];
+var R4_ACTIONS = ["away-set", "keep-awake", "perm-answer", "q-answer", "tidy-refresh", "tidy-apply", "tidy-undo", "skill-verdict"];
 function r4Invalid(f) {
   if (!f || !f.target) return "no computer";
   switch (f.action) {
@@ -2087,6 +2122,7 @@ function r4Invalid(f) {
     case "tidy-refresh": return "";
     case "tidy-apply": return Array.isArray(f.items) && f.items.length >= 1 && f.items.length <= QA_TIDY_MAX && f.items.every(function (i) { return i && QA_SID_RE.test(str(i.sessionId)) && tidyDestOk(i.dest); }) ? "" : "bad tidy request";
     case "tidy-undo": return QA_APPLY_RE.test(str(f.applyId)) ? "" : "bad undo request";
+    case "skill-verdict": return SKILL_ID_RE.test(str(f.skillId)) && (f.verdict === "approve" || f.verdict === "reject") ? "" : "bad skill request";
   }
   return "unknown action";
 }
@@ -3370,8 +3406,8 @@ function renderQueue() { /* the queued message is shown by the one toast */ }
 /** After a send request exists: say what happened to it (queued behind the current step, or delivered). */
 function watchSend(rid) { S.sendWatch[rid] = Date.now(); }
 /* Honest status: every request (except reply sends, list, peek and pairing, which have their own) ends in a toast saying Done or Failed + why, with Retry. */
-var REQ_LABEL = { start: "Start session", archive: "Archive", restore: "Restore", "agent-run": "Agent run", "research-now": "Research run", "agent-save": "Agent change", "agent-toggle": "Agent change", "agent-delete": "Agent delete", unpair: "Device removal" };
-var REQ_DONE = { start: "Session started on your Mac.", archive: "Archived.", restore: "Restored.", "agent-run": "Agent run started.", "research-now": "Research run started.", "agent-save": "Agent saved.", "agent-toggle": "Agent updated.", "agent-delete": "Agent deleted.", unpair: "Device removed." };
+var REQ_LABEL = { start: "Start session", archive: "Archive", restore: "Restore", "agent-run": "Agent run", "research-now": "Research run", "agent-save": "Agent change", "agent-toggle": "Agent change", "agent-delete": "Agent delete", unpair: "Device removal", "skill-verdict": "Skill suggestion" };
+var REQ_DONE = { start: "Session started on your Mac.", archive: "Archived.", restore: "Restored.", "agent-run": "Agent run started.", "research-now": "Research run started.", "agent-save": "Agent saved.", "agent-toggle": "Agent updated.", "agent-delete": "Agent deleted.", unpair: "Device removed.", "skill-verdict": "Saved." };
 function watchReq(id, f) { if (f && REQ_LABEL[f.action]) S.reqWatch[id] = { f: f, at: Date.now() }; }
 /** Where a request is now: "sending" (not picked up yet), "working", "done" or "error". */
 function reqState(id) {
@@ -3383,9 +3419,10 @@ function checkReqWatch() {
   rfCheck();
   Object.keys(S.reqWatch).forEach(function (id) {
     var w = S.reqWatch[id], x = reqState(id), a = w.f.action;
-    if (x.st === "done") { delete S.reqWatch[id]; toast(w.f.doneMsg || REQ_DONE[a] || "Done."); render(true); }
+    if (x.st === "done") { delete S.reqWatch[id]; if (a === "skill-verdict") { S.sk.done[w.f.skillId] = w.f.verdict; w.f.doneMsg = w.f.verdict === "approve" ? "Approved. Ask Claude to build the skill when you are ready." : "Rejected. It will not be suggested again."; } toast(w.f.doneMsg || REQ_DONE[a] || "Done."); render(true); }
     else if (x.st === "error") {
       delete S.reqWatch[id];
+      if (a === "skill-verdict" && /^(?:tool error:\s*)?(already-done|not-found)$/i.test(str(x.r.error))) S.sk.done[w.f.skillId] = "gone";
       toast(REQ_LABEL[a] + " failed: " + friendlyError(a, x.r.error || x.r.result || "unknown error"), { action: { label: "Retry", fn: function () { createRequest(w.f); } } });
       render(true);
     } else if (Date.now() - w.at > 300000) { delete S.reqWatch[id]; toast(REQ_LABEL[a] + ": no answer from your Mac in 5 min. Is it awake?"); }
@@ -4223,7 +4260,7 @@ function apDetail(d) {
 
 /* ---------- Saves and Activity tabs ---------- */
 var STATUS_LABEL = Object.assign(Object.create(null), { "new": "New", claimed: "Claimed", done: "Done", error: "Error", unverified: "Unverified", unknown: "Unknown \u2014 check" });
-var ACTION_LABEL = Object.assign(Object.create(null), { send: "Reply", archive: "Archive", list: "Refresh", peek: "Peek", start: "Start session", restore: "Restore", "agent-save": "Save agent", "agent-run": "Run agent", "agent-toggle": "Agent on/off", "research-now": "Research", pair: "Pair device", unpair: "Remove device", "away-set": "Away mode", "perm-answer": "Permission answer", "q-answer": "Question answer", "keep-awake": "Keep awake", "tidy-refresh": "Tidy refresh", "tidy-apply": "Tidy", "tidy-undo": "Undo Tidy" });
+var ACTION_LABEL = Object.assign(Object.create(null), { send: "Reply", archive: "Archive", list: "Refresh", peek: "Peek", start: "Start session", restore: "Restore", "agent-save": "Save agent", "agent-run": "Run agent", "agent-toggle": "Agent on/off", "research-now": "Research", pair: "Pair device", unpair: "Remove device", "away-set": "Away mode", "perm-answer": "Permission answer", "q-answer": "Question answer", "keep-awake": "Keep awake", "tidy-refresh": "Tidy refresh", "tidy-apply": "Tidy", "tidy-undo": "Undo Tidy", "skill-verdict": "Skill suggestion" });
 function focusables(root) { return Array.prototype.slice.call(root.querySelectorAll('a[href],button:not([disabled]),input:not([disabled]),select,textarea,[tabindex="0"]')); }
 /** Keep Tab inside a sheet: wraps last -> first and first (or the title) -> last. */
 function trapTab(e, root) {
@@ -5976,6 +6013,48 @@ function rfSaveRow(it, model, verified) {
   if (open) { var body = saveRow(it, model, verified); top.appendChild(h("div", { "class": "rf-more" }, body.querySelector(".sbody") || document.createDocumentFragment())); }
   return top;
 }
+/** Suggested skills to learn: one row per NEW radar suggestion on the Mac; Approve / Reject each ask first (confirm dialog), then send a signed skill-verdict. Text is set with textContent only. */
+function skillPending(id) {
+  return Object.keys(S.reqWatch).some(function (k) { var w = S.reqWatch[k]; return w && w.f && w.f.action === "skill-verdict" && w.f.skillId === id; });
+}
+function skillAsk(it, verdict, machine) {
+  var ap = verdict === "approve";
+  S.ask = { title: ap ? "Approve this skill?" : "Reject this creator?", okLabel: ap ? "Approve" : "Reject",
+    body: (ap ? "Ticks " : "Crosses off ") + it.handle + " in your suggested-skills note on " + machine + ". " + (ap ? "Nothing is built until you ask Claude to build the skill." : "They will not be suggested again."),
+    ok: function () { createRequest(skillVerdictFields(it.id, verdict, machine)).then(function (rid) { if (rid) { toast("Sending\u2026"); render(true); } }); } };
+  renderDialog();
+}
+function rfSkillRow(it, m, machine) {
+  var tile = it.platform === "YouTube" ? "YT" : "TT", cls = it.platform === "YouTube" ? "t-yt" : "t-tt", done = S.sk.done[it.id], pend = skillPending(it.id);
+  var meta = it.score + "/5 \u00b7 " + it.saves + (it.saves === 1 ? " save" : " saves") + " \u00b7 " + (it.verdict === "suggest" ? "Suggested" : "Maybe");
+  var top = h("div", { "class": "rf-sv rf-sk", "data-k": "rf-skill", "data-id": it.id }, h("div", { "class": "rf-svtop" }, h("span", { "class": "rf-ty " + cls, "aria-hidden": "true", text: tile }),
+    h("div", { "class": "rf-grow" }, h("div", { "class": "rf-svtt", text: it.handle }), h("div", { "class": "rf-tiny", "data-k": "rf-skill-meta", text: it.platform + " \u00b7 " + meta }))));
+  if (it.why) top.appendChild(h("div", { "class": "rf-skwhy", text: it.why }));
+  if (it.link) top.appendChild(h("a", { "class": "rf-sklink", href: it.link, target: "_blank", rel: "noopener noreferrer", "data-k": "rf-skill-link", text: "Open on " + it.platform }));
+  var acts = h("div", { "class": "rf-sacts rf-skacts" });
+  var ok = m && m.online && m.verified !== false && m.youPaired === true, why = !m || !m.online ? machine + " is offline" : m.youPaired !== true ? "pair this device first" : "";
+  if (done && done !== "gone") acts.appendChild(h("span", { "class": "rf-skstate", "data-k": "rf-skill-state", text: done === "approve" ? "Approved \u2713" : "Rejected" }));
+  else if (done === "gone") acts.appendChild(h("span", { "class": "rf-skstate", "data-k": "rf-skill-state", text: "Already decided" }));
+  else if (pend) acts.appendChild(h("span", { "class": "rf-skstate", "data-k": "rf-skill-state", role: "status", text: "Sending to " + machine + "\u2026" }));
+  else {
+    acts.appendChild(rfBtn("Approve", { cls: "pri sm", k: "rf-skill-approve", disabled: !ok, title: ok ? null : why, label: "Approve " + it.handle, on: function () { skillAsk(it, "approve", machine); } }));
+    acts.appendChild(rfBtn("Reject", { cls: "sm", k: "rf-skill-reject", disabled: !ok, title: ok ? null : why, label: "Reject " + it.handle, on: function () { skillAsk(it, "reject", machine); } }));
+  }
+  top.appendChild(acts);
+  if (!ok && !done && !pend) top.appendChild(h("div", { "class": "rf-tiny rf-gatewhy", text: "Buttons are off: " + why }));
+  return top;
+}
+function rfSkillsCard(model, verified) {
+  var machine = "", list = [];
+  if (!model || !model.mstat) return null;
+  NAMES.forEach(function (n) { var m = model.mstat[n]; if (!machine && m && m.skills && m.skills.length) { machine = n; list = m.skills; } });
+  if (!list.length) return null;
+  var f = document.createDocumentFragment(), grp = h("div", { "class": "rf-grp", "data-k": "rf-skills-card" });
+  list.forEach(function (it) { grp.appendChild(rfSkillRow(it, model.mstat[machine], machine)); });
+  f.appendChild(rfSec("Suggested skills to learn", list.length));
+  f.appendChild(grp);
+  return f;
+}
 function rfSavesNode(model) {
   var p = savesPick(), wrap = h("div", { "class": "rf-saves" }), skills = rfSkillsReady();
   if (S.dbState === "none") return emptyBox("Can’t connect", "This browser can’t open a live connection to Mission Control.");
@@ -5983,6 +6062,7 @@ function rfSavesNode(model) {
   if (p.doc) wrap.appendChild(h("div", { id: "savesUpd", "class": "supd" + (stale ? " stale" : ""), text: (stale ? "⏱ " : "") + "updated " + ago(p.doc.at) + (stale ? " · may be out of date" : "") }));
   if (p.doc && !p.verified) wrap.appendChild(h("div", { "class": "banner", role: "status", style: "margin:0", text: "Unverified: these saves aren’t proven to come from your Mac (" + unverifiedReason(docVerdict("saves/" + p.name)) + "). Links and actions are off." }));
   if (skills.length) { wrap.appendChild(rfSec("Skills ready", skills.length)); var sk = h("div", { "class": "rf-skills", "data-k": "rf-skills" }); skills.forEach(function (n) { sk.appendChild(h("span", { "class": "rf-skill", text: n })); }); wrap.appendChild(sk); }
+  var skc = rfSkillsCard(model, p.verified); if (skc) wrap.appendChild(skc);
   wrap.appendChild(rfSec("Saved links"));
   var fw = h("div", { "class": "rf-filters", role: "group", "aria-label": "Filter by type" });
   RF_SAVE_TYPES.forEach(function (t) { fw.appendChild(h("button", { "class": "rf-fchip", type: "button", "data-k": "rf-sf-" + t[0], "aria-pressed": String(S.rf.saveFilter === t[0]), onclick: function () { S.rf.saveFilter = t[0]; render(true); }, text: t[1] })); });
