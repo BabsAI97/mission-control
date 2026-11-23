@@ -32,7 +32,7 @@ var S = {
   drafts: Object.create(null), reqErr: "", unknown: Object.create(null), pairUI: null, relayReadyAt: 0, reqSnapAt: 0, focusTimer: 0, lastRefreshAt: 0, focusActiveAt: 0, undo: null,
   ask: null, actOpen: false, savesOpen: false, saveSel: null, saveFocus: null, bannerOff: NaN, toastMsg: "",
   dragging: false, dirty: false, pinching: false, suppressUntil: 0, lastSig: "",
-  rf: { order: "effort", sheet: null, opener: null, local: Object.create(null), undone: Object.create(null), hold: Object.create(null), reqs: Object.create(null), vals: Object.create(null), checks: Object.create(null), askPend: Object.create(null), jobAsks: Object.create(null), overlay: Object.create(null), saveSt: Object.create(null), snz: false, confirm: "", gate: "", gateAns: null, gateSel: Object.create(null), gateBusy: false, deep: "", badge: -1, pageAt: Date.now(), sessMode: "stack", saveFilter: "all", showNames: false, push: { sub: null, busy: false }, stack: { all: false, seen: Object.create(null), busy: Object.create(null), last: null } },
+  rf: { order: "effort", sheet: null, opener: null, local: Object.create(null), undone: Object.create(null), hold: Object.create(null), reqs: Object.create(null), vals: Object.create(null), checks: Object.create(null), askPend: Object.create(null), jobAsks: Object.create(null), overlay: Object.create(null), saveSt: Object.create(null), snz: false, confirm: "", gate: "", gateAns: null, gateSel: Object.create(null), gateBusy: false, deep: "", badge: -1, pageAt: Date.now(), sessMode: "home", saveFilter: "all", showNames: false, push: { sub: null, busy: false }, stack: { all: false, seen: Object.create(null), busy: Object.create(null), last: null } },
   tab: "decide", filter: "all", query: "", pins: Object.create(null), readAt: Object.create(null), readBase: NaN, queue: [], qTimer: 0, sendWatch: Object.create(null), reqWatch: Object.create(null),
   schedules: { Mac: undefined, PC: undefined }, saveOpen: null, actExp: null, swiping: false, openRow: null, hint: true, needsMap: Object.create(null), unreadMap: Object.create(null), todayData: null,
   assistInfo: null, assistAbout: "", assistDraft: "", assistLocal: [], assistSentAt: 0, assistAiAtSend: 0, assistLast: null, assistReq: null, cardState: Object.create(null), pairWatch: null,
@@ -426,7 +426,7 @@ async function connect() {
   render(true);
 }
 /* ---------- code updates: the Mac signs a release; the service worker fetches, hash-checks and swaps; the user reloads ---------- */
-var REL = { running: 0, offered: 0, state: "", sw: false }; // state: "" | "ready" | "refused"
+var REL = { running: 0, page: 0, offered: 0, state: "", sw: false }; // state: "" | "ready" | "refused"
 function swActive() {
   try { return navigator.serviceWorker && navigator.serviceWorker.getRegistration ? navigator.serviceWorker.getRegistration().then(function (r) { return r && r.active ? r : null; }) : Promise.resolve(null); } catch (e) { return Promise.resolve(null); }
 }
@@ -435,7 +435,7 @@ function initRelease() {
     if (!navigator.serviceWorker) return;
     navigator.serviceWorker.addEventListener("message", function (e) {
       var d = e.data || {};
-      if (d.type === "status") { REL.running = d.v | 0; }
+      if (d.type === "status") { REL.running = d.v | 0; if (!REL.page) REL.page = d.v | 0; } // page = the release this page was loaded from (running moves to the new one once an update is swapped in)
       else if (d.type === "release-result") {
         if (d.ok) { REL.state = "ready"; REL.running = d.v | 0; swActive().then(function (r) { if (r && r.update) r.update().catch(function () {}); }); } // a changed sw.js installs only now that the swapped release lists it
         else if (d.reason === "mismatch" || d.reason === "fetch") REL.state = "refused";
@@ -709,7 +709,7 @@ function derive() {
     var m = S.machines[n], online = false, t = NaN;
     if (m) { t = Date.parse(m.lastSeen); online = !isNaN(t) && (S.now - t) < ONLINE_MS; }
     var verified = !S.sig || S.sig["machines/" + n] === "ok", heldKey = !!(typeof DEV !== "undefined" && DEV.macKeys && DEV.macKeys[n]), mine = m && (verified || heldKey) ? mapSessions(m.sessions, n, online, S.now, S.titles, !verified) : [];
-    mstat[n] = { exists: !!m, online: online, lastSeen: t, version: m ? str(m.version) : "", mode: m ? str(m.mode) : "", pairing: m && m.pairing === "paired" ? "paired" : "none", total: m && isFinite(Number(m.total)) ? Number(m.total) : null,
+    mstat[n] = { exists: !!m, online: online, lastSeen: t, version: m ? str(m.version) : "", bridgeVersion: verified && m && /^\d{1,6}\.\d{1,6}\.\d{1,6}$/.test(str(m.bridgeVersion)) ? m.bridgeVersion : "", mode: m ? str(m.mode) : "", pairing: m && m.pairing === "paired" ? "paired" : "none", total: m && isFinite(Number(m.total)) ? Number(m.total) : null,
       pairLocked: !!m && m.pairLocked === true, devicePaired: false, verified: verified, sigState: (S.sig && S.sig["machines/" + n]) || "pending", usage: m && verified ? cleanUsage(m.usage) : null, caps: cleanCaps(m && m.caps), folders: verified ? cleanFolders(m && m.folders) : [], startLimit: cleanStartLimit(verified && m ? m.startLimit : null), startReason: verified && m && m.startReason === "not enabled" ? "starting is off on the Mac" : "", assistant: cleanAssistant(m && m.assistant), devices: verified ? cleanDevices(m && m.devices) : [], quotaWarn: verified ? cleanQuotaWarn(m && m.quotaWarn) : "", saved: verified ? cleanSaved(m && m.saved) : [], away: verified ? cleanAway(m && m.away) : cleanAway(null), keepAwake: verified ? cleanKeepAwake(m && m.keepAwake) : cleanKeepAwake(null), pending: verified ? cleanPending(m && m.pending) : [], rf: verified ? cleanRefocus(m, n) : cleanRefocus(null, n), tidy: verified ? cleanTidy(m && m.tidy) : cleanTidy(null), configLoadedAt: verified && m ? str(m.configLoadedAt).slice(0, 40) : "", lastError: m ? str(m.lastError) : "", lastErrorAt: m ? Date.parse(m.lastErrorAt) : NaN, shown: mine.length };
     if (!m) return;
     buildTree(m.tree, tree);
@@ -2965,7 +2965,7 @@ function renderTabbar(model) {
   bar.appendChild(inner);
 }
 function setTab(k) {
-  if (k === S.tab) { if (k === "sessions" && S.rf.sessMode === "browse" && (S.group || S.sub || S.view !== "home")) go(null, null); else window.scrollTo(0, 0); return; }
+  if (k === S.tab) { if (k === "sessions" && S.rf.sessMode === "browse" && (S.group || S.sub || S.view !== "home")) go(null, null); else if (k === "sessions" && S.rf.sessMode !== "home" && S.view === "home") { S.rf.sessMode = "home"; render(true); window.scrollTo(0, 0); } else window.scrollTo(0, 0); return; }
   S.menuOpen = false; renderMenu();
   S.tab = k; S.sel = null; S.lastSig = ""; S.zoom = 1; S.panX = 0; S.panY = 0;
   render(true); window.scrollTo(0, 0);
@@ -2981,7 +2981,7 @@ function renderTabHero(model) {
   else if (S.tab === "overnight") cap = "Works while you sleep. Nothing starts without your yes.";
   else if (S.tab === "decide") cap = "Least input first. Tap a row for the full picture.";
   else if (S.tab === "autopilot") cap = "Jobs that run themselves. Tap one to see what is inside.";
-  else if (S.tab === "sessions") { var rm = S.model, un = rm ? rfStackList(uniq(rm), false).length : 0; cap = rm ? plural(uniq(rm).length, "chat", "chats") + ", " + un + " unsorted." : ""; }
+  else if (S.tab === "sessions") { var rm = S.model, un = rm ? rfStackList(uniq(rm), false).length : 0; cap = S.rf.sessMode === "home" ? "Tap a chat to open it." : rm ? plural(uniq(rm).length, "chat", "chats") + ", " + un + " unsorted." : ""; }
   hero.className = "hero";
   if (S.tab === "activity" || S.tab === "overnight" || S.tab === "assistant") hero.appendChild(h("button", { "class": "btn link back2", type: "button", onclick: function () { setTab(S.tab === "overnight" ? "autopilot" : "decide"); }, text: S.tab === "overnight" ? "\u2039 Autopilot" : "\u2039 Decide" }));
   hero.appendChild(h("div", { "class": "titlerow" }, h("h2", { "class": "large", id: "ptitle", tabindex: "-1", text: ({ today: "Today", saves: "Saves", activity: "Activity", assistant: "Assistant", autopilot: "Autopilot", decide: "Decide", overnight: "Overnight run", sessions: "Sessions" })[S.tab] || "" })));
@@ -3109,8 +3109,10 @@ function renderMain(model) {
   if (!model.loaded) { main.appendChild(emptyBox("Connecting…", "Waiting for your computers to report in.")); return; }
   if (model.neverSeen) { main.appendChild(emptyBox("No computer connected yet", "No computer connected yet. Open the Claude app on your Mac or PC with Mission Control 0.8.6+.")); return; }
   if (S.tab === "today") { main.appendChild(todayNode(model)); return; }
+  if (S.tab === "sessions" && S.rf.sessMode === "home" && S.view !== "archive") { main.appendChild(sessionsHomeNode(model)); return; }
   if (S.tab === "sessions" && S.rf.sessMode === "stack" && S.view !== "archive") { main.appendChild(sessionsStackNode(model)); return; }
   if (S.tab === "sessions" && S.view === "home" && !S.group && !S.sub && S.filter === "all" && !S.query.trim()) main.appendChild(h("button", { "class": "rf-link rf-blk", type: "button", "data-k": "rf-tosort", onclick: function () { S.rf.sessMode = "stack"; render(true); window.scrollTo(0, 0); }, text: "\u2039 Sort chats" }));
+  if (S.tab === "sessions" && S.view === "home" && !S.group && !S.sub && S.filter === "all" && !S.query.trim() && S.rf.sessMode === "browse") main.appendChild(h("button", { "class": "rf-link rf-blk", type: "button", "data-k": "rf-tohome", onclick: function () { S.rf.sessMode = "home"; render(true); window.scrollTo(0, 0); }, text: "\u2039 Sessions" }));
   if (S.view === "archive") { main.appendChild(archiveView()); return; }
   if (!model.sessions.length) { main.appendChild(emptyBox("No sessions reported", "Your computer is connected but has not listed any sessions yet. Try Refresh in the ⋯ menu.")); return; }
   var g = S.group && model.gmap[S.group];
@@ -4287,15 +4289,18 @@ function saveRow(it, model, verified) {
 function openStart(kind, save, skill, preset, out) {
   var model = S.model, gate = startGate(model.mstat);
   if (!gate.ok) { toast("Can't start a session: " + gate.reason + "."); return; }
-  var tm = model.mstat[gate.target] || {}, sel = folderPicker(tm.folders, lsGet(FOLDER_KEY), model.groups);
+  var tm = model.mstat[gate.target] || {}, fdef = out ? saveFolderDefault(out, tm.folders) : "", sel = folderPicker(tm.folders, fdef || lsGet(FOLDER_KEY), model.groups); // v15: an action (KB note, Make skill, Task) has its own default folder; an earlier choice no longer sneaks in
+  var flab = h("label", { "class": "cap", "data-k": "start-folder-label", text: sel.getAttribute("data-k") === "start-folder" ? "Folder" : "Project" }), fname = out === "Skill" ? "Make skill" : out;
+  function setFlab() { if (!fdef || sel.getAttribute("data-k") !== "start-folder") return; var ch = sel.value !== fdef; flab.textContent = ch ? "Folder (changed)" : "Folder (default for " + fname + ")"; flab.className = "cap" + (ch ? " chg" : ""); }
+  setFlab(); sel.addEventListener("change", setFlab);
   var ta = kind === "plain" ? h("textarea", { "class": "ta", "aria-label": "Prompt", maxlength: "1500", text: preset || "Look at this saved post and tell me what is worth doing with it." }) : null;
   var preview = h("div", { "class": "pv", text: startFields(kind, save, { target: gate.target, skill: skill, prompt: "" }).prompt.split("\n\n").slice(kind === "plain" ? 1 : 0).join("\n\n") });
   var node = h("div", { "class": "startbox" }, ta ? h("label", { "class": "cap", text: "Your prompt" }) : null, ta, h("div", { "class": "cap", text: ta ? "The saved post goes in as quoted data:" : "Fixed brief (the saved post is quoted data):" }), preview,
-    h("label", { "class": "cap", text: sel.getAttribute("data-k") === "start-folder" ? "Folder" : "Project" }), sel, h("div", { "class": "cap", text: startLimitText(tm.startLimit) }));
+    flab, sel, h("div", { "class": "cap", text: startLimitText(tm.startLimit) }));
   S.ask = { title: kind === "research" ? "Research this save?" : kind === "skill-install" ? "Install this skill?" : "Start a session with this save?", okLabel: "Start session", body: "On " + gate.target + ". Nothing starts until you confirm.", node: node,
     ok: function () {
       var f = startFields(kind, save, Object.assign({ target: gate.target, skill: skill, prompt: ta ? ta.value : "" }, pickerFields(sel)));
-      if (f.folderId) lsSet(FOLDER_KEY, f.folderId);
+      if (f.folderId && !out) lsSet(FOLDER_KEY, f.folderId);
       createRequest(f).then(function (id) { if (id) { toast("Sending to your Mac\u2026"); if (out) rfSaveMark(save, out); } });
     } };
   renderDialog();
@@ -4534,9 +4539,9 @@ function openMenu() { S.menuOpen = true; renderMenu(); }
 function menuClose(refocus) { if (!S.menuOpen) return; S.menuOpen = false; S.menuFocus = refocus === false ? "" : "btn"; renderMenu(); }
 function renderMenu() {
   var host = $("menuHost"), btn = $("moreBtn"), m = S.model;
-  btn.setAttribute("aria-expanded", String(S.menuOpen));
+  btn.setAttribute("aria-expanded", String(S.menuOpen)); btn.classList.toggle("udot", REL.state === "ready");
   var pref = themePref();
-  var key = !S.menuOpen ? "closed" : JSON.stringify([pref, S.tab, rfPushText(rfPushState(rfPushRead()), NaN, 0), S.rf.push.busy, S.rf.showNames, rfData().push.vapidKey ? 1 : 0, (rfData().push.on[DEV.deviceId] || {}).lastAlertAt || 0, activityOpenCount(S.requests), !!S.busy["list"], S.list, S.view, m ? NAMES.map(function (n) { var x = m.mstat[n]; return [x.exists, x.online, bridgeOk(x.version), Math.floor(x.lastSeen / 10000)]; }) : 0]);
+  var key = !S.menuOpen ? "closed" : JSON.stringify([pref, S.tab, rfPushText(rfPushState(rfPushRead()), NaN, 0), S.rf.push.busy, S.rf.showNames, rfData().push.vapidKey ? 1 : 0, (rfData().push.on[DEV.deviceId] || {}).lastAlertAt || 0, activityOpenCount(S.requests), !!S.busy["list"], S.list, S.view, m ? NAMES.map(function (n) { var x = m.mstat[n]; return [x.exists, x.online, bridgeOk(x.version), x.bridgeVersion, Math.floor(x.lastSeen / 10000)]; }) : 0, REL.running, REL.page, REL.state]);
   var prev = host.getAttribute("data-key");
   if (prev === key) return;
   var opening = prev === null || prev === "closed", ae = document.activeElement;
@@ -4558,6 +4563,9 @@ function renderMenu() {
       return h("div", { "class": "mcomp" }, h("span", { "class": "dot " + (x.online ? "on" : "off"), "aria-hidden": "true" }), h("span", { text: n }),
         h("span", { "class": "cap", text: x.exists && !x.verified && !DEV.macKeys[n] ? "not paired (update its bridge, then pair)" : compWord(x) + (x.exists ? " \u00b7 seen " + ago(x.lastSeen) : "") + (x.exists && !bridgeOk(x.version) ? " \u00b7 bridge update needed" : "") }));
     })));
+  var vm = m ? NAMES.filter(function (n) { return m.mstat[n].exists; }) : [], vl = versionLine(REL, vm.length ? m.mstat[vm[0]].bridgeVersion : "");
+  pop.appendChild(h("div", { "class": "ver", "data-k": "menu-version" }, h("div", null, vl.app + " \u00b7 " + vl.bridge + " \u00b7 ", h("span", { "class": "vw " + vl.state, text: vl.word })),
+    vl.state === "ready" ? h("button", { "class": "btn primary", type: "button", "data-k": "menu-reload", onclick: function () { location.reload(); }, text: REL.running > 0 && REL.running !== (REL.page | 0) ? "Reload to get v" + REL.running : "Reload to update" }) : null));
   if (m && m.sessions.length && S.tab === "sessions" && S.view === "home" && !S.list && (!S.group || S.sub || m.gmap[S.group]))
     pop.appendChild(h("button", { "class": "mi", type: "button", "data-k": "mi-tidy", onclick: function () { savePos(viewKey(), null); menuClose(); render(true); } }, h("span", { text: "Tidy bubbles" })));
   pop.appendChild(h("button", { "class": "mi", type: "button", "data-k": "mi-guide", onclick: function () { menuClose(false); openGuide(); } }, h("span", { text: "Quick guide" }), h("span", { "aria-hidden": "true", text: "?" })));
@@ -4576,6 +4584,22 @@ function openGuide() {
 function openUsage() { S.ask = { title: "Usage", info: true, okLabel: "Close", opener: $("usageRow"), node: usageNode(S.model || derive()) }; renderDialog(); }
 
 /* ---------- focus panel (second tap): latest messages + reply ---------- */
+/* v15: while any sheet or dialog is open the page behind must not scroll (iPhone Safari lets the page scroll under a fixed sheet). The body is pinned with position:fixed at the scroll position it had, and put back exactly on close. */
+var SHEET_HOSTS = ["menuHost", "focusHost", "quickHost", "decHost", "dlgHost"], SCROLL_LOCK = { on: false, y: 0 };
+function sheetsOpen() {
+  return SHEET_HOSTS.some(function (id) { var e = $(id); if (!e || !e.firstChild) return false; return !(id === "focusHost" && e.querySelector && e.querySelector(".fsheet.docked")); }); // a docked chat on a wide screen is a side panel, not a modal
+}
+function syncScrollLock() {
+  var plan = scrollLockPlan(SCROLL_LOCK.on, sheetsOpen(), window.pageYOffset || 0), b = document.body;
+  if (plan.op === "lock") { SCROLL_LOCK.on = true; SCROLL_LOCK.y = -plan.top; b.style.top = plan.top + "px"; b.classList.add("sheet-lock"); }
+  else if (plan.op === "unlock") { SCROLL_LOCK.on = false; b.classList.remove("sheet-lock"); b.style.top = ""; window.scrollTo(0, SCROLL_LOCK.y); }
+}
+function watchSheets() {
+  if (typeof MutationObserver === "undefined") return;
+  if (typeof window !== "undefined" && window.addEventListener) window.addEventListener("resize", syncScrollLock);
+  var mo = new MutationObserver(syncScrollLock);
+  SHEET_HOSTS.forEach(function (id) { var e = $(id); if (e) mo.observe(e, { childList: true }); });
+}
 function setInert(on) {
   [$("shell"), $("tabbar"), $("peekHost")].forEach(function (e) { if (!e) return; if (on) e.setAttribute("inert", ""); else e.removeAttribute("inert"); });
 }
@@ -4620,8 +4644,9 @@ function askSend(s, text) {
   if (!t || S.busy["send:" + s.id]) return;
   var gdA = typeof rfGatedDecFor === "function" ? rfGatedDecFor(s.id, "", s.machine) : null;
   if (gdA) { rfReplyViaYes(s.id, s.machine, t, false, gdA); return; } // a gated chat is never sent a plain reply: straight to its yes screen, with this text
-  S.ask = { title: run ? "Queue this reply?" : "Send this reply?", okLabel: run ? "Queue" : "Send", body: "To “" + s.title + "” on " + s.machine + ":\n\n“" + t + "”\n\n" + (run ? "Claude is working. Your message waits 5 seconds (you can undo), then Claude reads it after the current step." : "It goes into the session as your message."),
-    ok: function () { if (run) queueReply(s, t); else doSend(s, t); } };
+  S.ask = { title: run ? "Queue this reply?" : "Send this reply?", okLabel: run ? "Yes, queue" : "Yes, send", cancelLabel: "Not now", sheet: true, top: true,
+    body: "To “" + s.title + "” on " + s.machine + ". This exact text:" + (run ? "\nClaude is working. It waits 5 seconds (you can undo), then Claude reads it after the current step." : ""), node: h("div", { "class": "quote", "data-k": "reply-quote", text: t }),
+    keyExtra: s.id + "|" + t, ok: function () { if (run) queueReply(s, t); else doSend(s, t); } };
   renderDialog();
 }
 function grabHandlers(grab, sheet) { // swipe down on the grab bar to close; pointer capture means a finger-up outside still ends it
@@ -4637,6 +4662,18 @@ function grabHandlers(grab, sheet) { // swipe down on the grab bar to close; poi
   grab.addEventListener("pointerup", function (e) { end(e, false); });
   grab.addEventListener("pointercancel", function (e) { end(e, true); });
   grab.addEventListener("lostpointercapture", function (e) { end(e, true); });
+}
+/** Choice pills for the chat sheet: only while the chat waits on you and its last message offers options. onPick(text) is the app's own "review and send" path: it never sends by itself. */
+function chatPillsNode(s, view, now, canReply, onPick) {
+  var last = view && view.status === "ok" && view.items.length ? view.items[view.items.length - 1] : null, opts = canReply && last && last.kind === "assistant" && needsYou(s, view, now) ? choicesFrom(last.text) : [];
+  if (!opts.length) return null;
+  return h("div", { "class": "pills", role: "group", "aria-label": "Suggested answers (tap one, then confirm)", "data-k": "fpills" }, opts.map(function (o, i) { return h("button", { "class": "cpill", type: "button", "data-k": "fpill-" + i, onclick: function () { onPick(o); }, text: o }); }));
+}
+/** The fixed quick replies. A tap never sends: it fills the box and goes through askSend (one confirm for a plain chat, the hash-bound yes screen for a gated one), exactly like a pill. */
+function chatChipsNode(s, canChip, fill) {
+  if (!canChip) return null;
+  return h("div", { "class": "qchips", role: "group", "aria-label": "Common replies (tap one, then confirm)", "data-k": "fchips" },
+    QUICK_REPLIES.map(function (t) { return h("button", { "class": "qchip", type: "button", "data-k": "qc-" + t, onclick: function () { if (S.busy["send:" + s.id]) return; fill(t); askSend(s, t); }, text: t }); }));
 }
 function renderFocus() {
   var host = $("focusHost"), id = S.focus;
@@ -4677,11 +4714,12 @@ function renderFocus() {
   var inp = h("input", { type: "text", "data-k": "freply", maxlength: 4000, enterkeyhint: "send", autocomplete: "off", placeholder: s.online ? "Write a reply\u2026" : s.machine + " is offline", "aria-label": "Your reply to " + s.title, value: S.drafts[id] || "", disabled: !s.online || busy || unp ? "" : null });
   inp.addEventListener("input", function () { S.drafts[id] = inp.value; });
   inp.addEventListener("keydown", function (e) { if (e.key === "Enter") { e.preventDefault(); if (!e.repeat) askSend(s, inp.value); } });
-  var sendBtn = h("button", { "class": "send", type: "button", "data-k": "fsend", "aria-label": "Review and send", disabled: !s.online || busy || unp ? "" : null, onclick: function () { askSend(s, inp.value); } }, icon("send", 18));
-  /* Quick replies: only while the session is asking you something. One tap sends the fixed text (these never change, so no confirm). */
-  var canChip = s.online && !busy && !unp && peekAsks(view, now), chips = canChip ? h("div", { "class": "qchips", role: "group", "aria-label": "Quick replies" },
-    QUICK_REPLIES.map(function (t) { return h("button", { "class": "qchip", type: "button", "data-k": "qc-" + t, onclick: function () { if (S.busy["send:" + s.id]) return; if (s.status === "running") queueReply(s, t); else doSend(s, t); toast("Sent: \u201c" + t + "\u201d"); }, text: t }); })) : null;
-  var comp = h("div", { "class": "fcomp" }, chips, h("div", { "class": "rr" }, inp, sendBtn), h("div", { "class": "cap", text: s.unverified ? "Unverified data from the Mac: replying is off." : unp ? "Pair this device first to reply." : s.online ? (s.status === "running" ? "Claude is working. Your message waits 5 s (Undo), then Claude reads it after the current step." : "You\u2019ll see exactly what gets sent before it goes.") : s.machine + " is offline. Replies come back when it reconnects." }));
+  var sendBtn = h("button", { "class": "send", type: "button", "data-k": "fsend", "aria-label": "Review and send", disabled: !s.online || busy || unp ? "" : null, onclick: function () { askSend(s, inp.value); } }, "Send"); // v15: a labelled filled button, grey only when it really cannot send
+  /* Quick replies: only while the session is asking you something. A tap never sends: it opens the same confirm as a pill (the hash-bound yes screen for a gated chat). */
+  var chips = chatChipsNode(s, s.online && !busy && !unp && peekAsks(view, now), function (t) { inp.value = t; S.drafts[id] = t; });
+  /* v15 choice pills: when the chat waits on you and its last message offers options, each option is a suggestion. A tap only fills the reply and opens the SAME confirm (the hash-bound yes screen for a gated chat); nothing is sent by the tap itself. */
+  var pills = chatPillsNode(s, view, now, s.online && !busy && !unp, function (o) { inp.value = o; S.drafts[id] = o; askSend(s, o); });
+  var comp = h("div", { "class": "fcomp" }, pills, chips, h("div", { "class": "rr" }, inp, sendBtn), h("div", { "class": "cap", text: s.unverified ? "Unverified data from the Mac: replying is off." : unp ? "Pair this device first to reply." : s.online ? (s.status === "running" ? "Claude is working. A reply is read after its current step." : "You\u2019ll see exactly what gets sent before it goes.") : s.machine + " is offline. Replies come back when it reconnects." }));
   var grab = h("div", { "class": "fgrab", "aria-hidden": "true" }, h("i"));
   var sheet = h("section", { "class": "fsheet" + (docked ? " docked" : ""), role: "dialog", "aria-modal": docked ? null : "true", "aria-labelledby": "ft" }, grab, head, acts, log, comp);
   grabHandlers(grab, sheet);
@@ -4740,6 +4778,28 @@ function quickBanner() {
   return h("button", { "class": "qbanner" + (n ? "" : " zero"), type: "button", "data-k": "qbanner", onclick: function () { openQuick("wait"); } },
     h("span", { "class": "qdot", "aria-hidden": "true" }), h("span", { "class": "qgrow", text: quickBannerText(n) }), h("span", { "aria-hidden": "true", text: "›" }));
 }
+/** The exact command, verbatim: every newline and tab kept (pre-wrap), wraps only after "/" or a space, invisible/control/bidi characters shown as <U+XXXX>, and an "N lines" label when it has several. */
+function cmdNode(text, key) {
+  var raw = str(text), vis = cmdVisible(raw), n = cmdLineCount(raw), hid = vis !== raw;
+  var box = h("div", { "class": "cmdbox", "data-k": key || null, tabindex: "0", role: "group", "aria-label": n > 1 ? "Command, " + n + " lines" : "Command" });
+  cmdPieces(vis).forEach(function (p, i) { if (i) box.appendChild(h("wbr")); box.appendChild(h("span", { "class": "nw", text: p })); });
+  var notes = [];
+  if (n > 1) notes.push(n + " lines. Every line runs, in order.");
+  if (hid) notes.push("Hidden characters are shown like \u27e8U+202E\u27e9.");
+  return h("div", { "class": "cmdwrap" }, box, notes.length ? h("div", { "class": "cmdlines", "data-k": key ? key + "-lines" : null, text: notes.join(" ") }) : null);
+}
+/** The plain-English line under a shell command (display only). Other tools (Write, Edit...) get none. */
+function cmdWhatNode(it, key) {
+  if (!it || (it.tool && it.tool !== "Bash") || !str(it.summary)) return null;
+  var x = cmdExplain(it.summary);
+  return h("div", { "class": "cmdwhat" + (x.destructive ? " bad" : ""), "data-k": key || null }, x.destructive ? h("span", { "aria-hidden": "true", text: "\u26a0" }) : null, h("span", { text: x.text }));
+}
+/** The "Allow this command once?" yes screen: Not now first and filled, then the exact command and what it does. A destructive command makes Allow an outlined red button. */
+function permAllowAsk(it, title, onYes) {
+  var node = h("div", { "class": "cmdask" }, h("div", { "class": "cmdcap", text: "The Mac will run exactly this:" }), cmdNode(it.summary, "allow-cmd"), cmdWhatNode(it, "allow-what"));
+  S.ask = { title: "Allow this command once?", okLabel: "Yes, allow once", cancelLabel: "Not now", sheet: true, top: true, safe: true, risk: true, body: "Runs only this exact command in " + title + ". Anything else still asks.", node: node, keyExtra: str(it.inputHash), ok: onYes };
+  renderDialog();
+}
 /** A confirm sheet (the mock's bottom sheet): Cancel + one action. Nothing is sent before the action is tapped. */
 function quickAsk(cp, ok, danger) {
   S.ask = { title: cp.title, body: cp.body, okLabel: cp.ok, sheet: true, primary: !danger, danger: !!danger, ok: ok };
@@ -4749,8 +4809,13 @@ function quickDoneLine(msg) { return h("div", { "class": "qdone", role: "status"
 function qaSel(id) { var m = S.qa.qsel || (S.qa.qsel = Object.create(null)); return m[id] || (m[id] = { picks: [], other: "", openOther: false }); }
 /** "Away mode is off: this prompt is waiting on the Mac." + "Turn on Away mode" (opens the Mac segment). Without Away mode on the phone cannot answer; there is nothing else to press. */
 function quickWaitsOnMac(card, c) {
-  card.appendChild(h("div", { "class": "qmuted", style: "margin-top:6px", text: c.awayOn ? "This prompt is waiting on the Mac." : "Away mode is off: this prompt is waiting on the Mac." }));
-  if (!c.awayOn && c.awayKnown) card.appendChild(h("button", { "class": "qlinkb", type: "button", "data-k": "qturnon-" + c.id, onclick: function () { S.qa.seg = "mac"; renderQuick(); }, text: "Turn on Away mode" }));
+  card.appendChild(h("div", { "class": "qmuted", style: "margin-top:6px", text: c.awayOn ? "This prompt is waiting on the Mac." : "The command shows here once Away mode is on. Right now this waits on the Mac." }));
+  if (!c.awayOn && c.awayKnown) {
+    // v15: one button that finishes the job. It opens the Away yes screen right here; after "Turn on" this same card shows the command with Deny / Allow once.
+    var ag = quickGate(S.model ? S.model.mstat : derive().mstat), busy = !!S.qa.awayReq;
+    card.appendChild(h("div", { "class": "qrow", style: "margin-top:8px" }, h("button", { "class": "qbtn2", type: "button", "data-k": "qturnon-" + c.id, disabled: !ag.ok || busy ? "" : null, onclick: function () { quickAway(true, S.qa.awayMin || 10, ag.target, true); }, text: busy ? "Turning on\u2026" : "Turn on Away to answer" })));
+    if (!ag.ok) card.appendChild(h("div", { "class": "qmuted", style: "margin-top:6px", text: "Away mode is off here: " + ag.reason + "." }));
+  }
 }
 /** One Waiting card. Question: its own options (or free text); your turn: reply; permission: the exact command with Deny / Allow once. Stuck chat: waits on the Mac. */
 function quickCardNode(c, gate) {
@@ -4810,13 +4875,14 @@ function quickPendCard(c, gate) {
     card.appendChild(h("div", { "class": "qrow" }, send));
   } else {
     card.appendChild(h("div", { "class": "qq", text: permLead(it) }));
-    card.appendChild(h("div", { "class": "qcode", "data-k": "qcmd-" + c.id, text: it.summary || "(the Mac sent no details)" }));
+    if (it.summary) { var qcn = cmdNode(it.summary, "qcmd-" + c.id); card.appendChild(qcn); var qwn = cmdWhatNode(it, "qwhat-" + c.id); if (qwn) card.appendChild(qwn); }
+    else card.appendChild(h("div", { "class": "qcode", "data-k": "qcmd-" + c.id, text: "(the Mac sent no details)" }));
     if (it.clipped) card.appendChild(h("div", { "class": "qmuted", "data-k": "qclip-" + c.id, style: "margin-top:6px", text: "(shortened \u2014 full text on the Mac)" }));
     card.appendChild(h("div", { "class": "qmuted", style: "margin-top:6px", text: permAgeText(it, S.now || Date.now()) }));
     var can = it.approvable === true && !!it.summary;
     if (it.approvable !== true) card.appendChild(h("div", { "class": "qmuted", "data-k": "qmaconly-" + c.id, style: "margin-top:6px", text: "Needs you at the Mac \u00b7 " + (it.why === "mac-only" ? "touches Mac-only files" : it.why === "too-long" ? "too long to check on the phone" : "can't be checked on the phone") }));
-    var row = h("div", { "class": "qrow" }, h("button", { "class": "qbtn2 sec", type: "button", "data-k": "qdeny-" + c.id, disabled: off ? "" : null, onclick: function () { quickPerm(c, "deny"); }, text: pend ? "Sending…" : "Deny" }));
-    if (can) row.appendChild(h("button", { "class": "qbtn2", type: "button", "data-k": "qallow-" + c.id, disabled: off ? "" : null, onclick: function () { quickPerm(c, "allow"); }, text: "Allow once" }));
+    var row = h("div", { "class": "qrow" }, h("button", { "class": "qbtn2", type: "button", "data-k": "qdeny-" + c.id, disabled: off ? "" : null, onclick: function () { quickPerm(c, "deny"); }, text: pend ? "Sending…" : "Deny" }));
+    if (can) row.appendChild(h("button", { "class": "qbtn2 risk", type: "button", "data-k": "qallow-" + c.id, disabled: off ? "" : null, onclick: function () { quickPerm(c, "allow"); }, text: "Allow once" }));
     else if (it.approvable === true) card.appendChild(h("div", { "class": "qmuted", text: "Without the command there is nothing to allow. Deny it, or answer at the Mac." }));
     card.appendChild(row);
   }
@@ -4851,7 +4917,7 @@ function quickQSend(c) {
 /** Deny goes straight away. Allow once asks first, and only if the prompt is still the one that was on the screen (same id AND same hash). */
 function quickPerm(c, decision) {
   if (decision === "deny") { quickSendPend(c, permFields(c.item, "deny"), "Denied", "Not denied"); return; }
-  quickAsk(quickConfirm("allow", { title: c.title }), function () {
+  permAllowAsk(c.item, c.title, function () {
     var now = quickCardsNow().filter(function (x) { return x.id === c.id && x.item; })[0];
     if (!now || now.item.inputHash !== c.item.inputHash) { toast("That prompt changed or is gone, so nothing was allowed. Look at it again."); renderQuick(); return; }
     quickSendPend(c, permFields(c.item, "allow"), "Allowed once", "Not allowed");
@@ -5258,7 +5324,7 @@ function renderQuick() {
   if (!S.qa.open) { tidyDragClear(); if (host.firstChild) { clear(host); if (!S.focus) setInert(false); } host.removeAttribute("data-key"); return; }
   if (QD && QD.active) { if (Date.now() - QD.at > 15000) tidyDragClear(); else { QD.dirty = true; return; } } // never rebuild the row that is under a finger
   var m = S.model ? S.model.mstat : derive().mstat, gate = quickGate(m), cards = quickCardsNow(), n = quickCount(cards), seg = S.qa.seg;
-  var key = JSON.stringify([seg, n, gate, cards.map(function (c) { return [c.id, c.kind, c.title, c.ask, c.stuckFor, c.rc, c.done, c.online, !!S.qa.pend[c.id], c.awayOn, c.item ? [c.item.inputHash, Math.floor(Date.now() / 60000)] : 0, JSON.stringify(S.qa.qsel && S.qa.qsel[c.id] || 0)]; }),
+  var key = JSON.stringify([seg, n, gate, !!S.qa.awayReq, cards.map(function (c) { return [c.id, c.kind, c.title, c.ask, c.stuckFor, c.rc, c.done, c.online, !!S.qa.pend[c.id], c.awayOn, c.item ? [c.item.inputHash, Math.floor(Date.now() / 60000)] : 0, JSON.stringify(S.qa.qsel && S.qa.qsel[c.id] || 0)]; }),
     seg === "run" ? [startGate(m), gate.ok && m[gate.target] ? m[gate.target].saved : 0] : 0,
     seg === "tidy" ? quickTidySig(gate, m) : 0,
     seg === "mac" ? [macNow(m[gate.ok ? gate.target : "Mac"], S.relay), S.qa.reload, !!S.qa.reloadReq, gate.ok ? [m[gate.target].away, m[gate.target].keepAwake] : 0, S.qa.awayReq, S.qa.keepReq, S.qa.awayMin] : 0]);
@@ -5542,6 +5608,12 @@ function rfAskBlock(key, chips, thread, pending, onAsk, hint) {
   f.appendChild(h("div", { "class": "rf-askrow" }, inp, rfBtn("Ask", { cls: "pri", k: "rf-ask-send", disabled: !!pending, on: function () { onAsk(inp.value); } })));
   return f;
 }
+/** Suggested answers for a typed-answer decision, read from its question by choicesFrom (rules, no AI). A tap only fills the answer (and, for a gated decision, opens its yes screen); it never sends. */
+function rfPillsNode(d, onPick) {
+  var o = choicesFrom(d.ask); if (!o.length) o = choicesFrom(d.what);
+  if (!o.length) return null;
+  return h("div", { "class": "pills", role: "group", "aria-label": "Suggested answers", "data-k": "rf-pills" }, o.map(function (t, i) { return h("button", { "class": "cpill", type: "button", "data-k": "rf-pill-" + i, onclick: function () { onPick(t); }, text: t }); }));
+}
 function rfAnswerBox(d) {
   var box = h("div", { "class": "rf-ansbox", "data-ans": "1" }), tgt = d.machine;
   if ((d.kind === "choice" || d.kind === "text") && (d.gate || d.gateBad)) {
@@ -5561,6 +5633,11 @@ function rfAnswerBox(d) {
       box.appendChild(grow);
       if (gmulti) box.appendChild(h("div", { "class": "rf-acts" }, rfBtn("Review your answer", { cls: "pri", k: "rf-gmulti-review", disabled: !gsel.length, on: function () { var pk = d.options.filter(function (x) { return gsel.indexOf(x) >= 0; }); if (!pk.length) return; S.rf.gateAns = { id: d.id, answers: pk }; S.rf.gate = d.id; renderDec(); } })));
     } else if (d.gate && d.kind === "text") {
+      var gpills = rfPillsNode(d, function (t) {
+        if (!rfAnswerFields(d, { answer: t }, d.machine, "0".repeat(64))) { toast("That answer has characters it can\u2019t carry."); return; }
+        S.rf.vals[d.id] = t; S.rf.gateAns = { id: d.id, answer: t }; S.rf.gate = d.id; renderDec(); // straight to the hash-bound yes screen, with this exact text
+      });
+      if (gpills) box.appendChild(gpills);
       var gv = S.rf.vals[d.id] || "", ginp = h(d.multiline ? "textarea" : "input", { "class": "rf-inp" + (d.multiline ? " ta" : ""), type: d.multiline ? null : "text", "data-k": "rf-gtext", placeholder: d.placeholder || "Your answer", "aria-label": d.placeholder || "Your answer", maxlength: "1000" });
       if (d.multiline) ginp.value = gv; else ginp.setAttribute("value", gv);
       ginp.addEventListener("input", function () { S.rf.vals[d.id] = ginp.value; ginp.classList.remove("bad"); });
@@ -5579,6 +5656,8 @@ function rfAnswerBox(d) {
     d.options.forEach(function (o, i) { row.appendChild(rfBtn(o, { cls: i === 0 ? "pri" : "", k: "rf-pick-" + i, on: function () { if (viaQ) rfQuestionAnswer(d, o); else rfAnswer(d, { answer: o }, "Answered: " + o); } })); });
     box.appendChild(row);
   } else if (d.kind === "text") {
+    var tpills = rfPillsNode(d, function (t) { S.rf.vals[d.id] = t; var dh = $("decHost"); if (dh) dh.removeAttribute("data-key"); renderDec(); }); // fills the box only (the key is cleared so the box redraws with it); Send still has to be tapped
+    if (tpills) box.appendChild(tpills);
     var val = S.rf.vals[d.id] || "", inp = h(d.multiline ? "textarea" : "input", { "class": "rf-inp" + (d.multiline ? " ta" : ""), type: d.multiline ? null : "text", "data-k": "rf-text", placeholder: d.placeholder || "Your answer", "aria-label": d.placeholder || "Your answer", maxlength: "1000" });
     if (d.multiline) inp.value = val; else inp.setAttribute("value", val);
     inp.addEventListener("input", function () { S.rf.vals[d.id] = inp.value; inp.classList.remove("bad"); });
@@ -5612,10 +5691,12 @@ function rfAnswerBox(d) {
     if (!p) box.appendChild(h("div", { "class": "rf-note", text: "This prompt is no longer on the Mac." }));
     else {
       box.appendChild(h("div", { "class": "rf-tiny", text: permLead(p) }));
-      box.appendChild(h("pre", { "class": "rf-ctx rf-cmd", "data-k": "rf-cmd", text: p.kind === "question" ? p.question : p.summary }));
+      if (p.kind === "question") box.appendChild(h("pre", { "class": "rf-ctx rf-cmd", "data-k": "rf-cmd", text: p.question }));
+      else { box.appendChild(cmdNode(p.summary, "rf-cmd")); var rwn = cmdWhatNode(p, "rf-what"); if (rwn) box.appendChild(rwn); }
       if (p.kind === "permission") {
         if (p.clipped || !p.approvable) box.appendChild(h("div", { "class": "rf-note", text: p.why === "too-long" ? "Too long to check on a phone, so it can only be denied here." : "This one can only be allowed at the Mac. You can deny it here." }));
-        box.appendChild(h("div", { "class": "rf-acts" }, rfBtn("Allow once", { cls: "pri", k: "rf-allow", disabled: !p.approvable, on: function () { rfPermAnswer(d, "allow"); } }), rfBtn("Deny", { cls: "bad", k: "rf-deny", on: function () { rfPermAnswer(d, "deny"); } })));
+        box.appendChild(h("div", { "class": "rf-acts" }, rfBtn("Deny", { cls: "pri", k: "rf-deny", on: function () { rfPermAnswer(d, "deny"); } }),
+          rfBtn("Allow once", { cls: "risk", k: "rf-allow", disabled: !p.approvable, on: function () { permAllowAsk(p, d.project, function () { rfPermAnswer(d, "allow"); }); } })));
       }
     }
   }
@@ -5624,16 +5705,18 @@ function rfAnswerBox(d) {
 function rfGateScreen(d) {
   var g = d.gate, w = h("div", { "class": "rf-gate", "data-k": "rf-gate" });
   w.appendChild(h("h3", { text: g.kind === "choice" ? "Send this answer?" : "Say yes to this one" }));
+  var ga = S.rf.gateAns && S.rf.gateAns.id === d.id ? S.rf.gateAns : null;
+  var noPick = g.kind === "choice" && !ga; // A1: a choice gate opened with no answer picked has nothing to send
+  // v15: Not now / Yes sit at the TOP of the yes screen (the mock), with the details below; still one hash-bound yes
+  w.appendChild(h("div", { "class": "rf-acts top" }, rfBtn(noPick ? "Back" : "Not now", { cls: "plain", k: "rf-gate-no", on: function () { S.rf.gate = ""; S.rf.gateAns = null; renderDec(); } }),
+    noPick ? null : rfBtn(S.rf.gateBusy ? "Sending…" : g.kind === "choice" ? "Yes, send this answer" : "Yes, do this one", { cls: "pri", k: "rf-gate-yes", disabled: !!S.rf.gateBusy, on: function () { rfDoGated(d); } })));
+  if (ga) w.appendChild(h("p", { "class": "rf-note rf-strong", "data-k": "rf-gate-answer", style: "color:var(--text,inherit);font-size:16px", text: (g.kind === "choice" ? "Send this answer: " : "Your answer: ") + (ga.answers !== undefined ? ga.answers.join(", ") : ga.answer) }));
   w.appendChild(h("p", { "class": "rf-note", text: (g.kind === "choice" ? "" : "This is " + RF_GATE_WORD[g.kind] + ". ") + (S.rf.gateAns && S.rf.gateAns.id === d.id ? "Your answer goes to the chat only if you say yes here." : g.kind === "choice" ? "Pick an answer on the previous screen first. Nothing is sent from here." : "Claude gets it ready. You do the last step (card, password or code).") }));
   var dl = h("dl", { "class": "rf-dl" });
   rfGateLines(g).forEach(function (l) { dl.appendChild(h("dt", { text: l[0] })); dl.appendChild(h("dd", { text: l[1] })); });
   w.appendChild(dl);
-  var ga = S.rf.gateAns && S.rf.gateAns.id === d.id ? S.rf.gateAns : null;
-  if (ga) w.appendChild(h("p", { "class": "rf-note rf-strong", "data-k": "rf-gate-answer", style: "color:var(--text,inherit);font-size:16px", text: (g.kind === "choice" ? "Send this answer: " : "Your answer: ") + (ga.answers !== undefined ? ga.answers.join(", ") : ga.answer) }));
   if (g.handoffUrl) w.appendChild(h("p", { "class": "rf-tiny" }, "Hand-over page: ", h("a", { href: g.handoffUrl, target: "_blank", rel: "noopener noreferrer", text: g.handoffUrl.replace(/^https:\/\//, "").slice(0, 60) })));
   w.appendChild(h("p", { "class": "rf-tiny", text: "This yes is for exactly these details" + (S.rf.gateAns && S.rf.gateAns.id === d.id ? " and exactly this answer" : "") + " and runs out after 15 minutes." }));
-  var noPick = g.kind === "choice" && !ga; // A1: a choice gate opened with no answer picked has nothing to send
-  w.appendChild(h("div", { "class": "rf-acts" }, noPick ? null : rfBtn(S.rf.gateBusy ? "Sending…" : g.kind === "choice" ? "Yes, send this answer" : "Yes, do this one", { cls: "pri", k: "rf-gate-yes", disabled: !!S.rf.gateBusy, on: function () { rfDoGated(d); } }), rfBtn(noPick ? "Back" : "Not now", { k: "rf-gate-no", on: function () { S.rf.gate = ""; S.rf.gateAns = null; renderDec(); } })));
   return w;
 }
 function rfOpt(label, sub, o) {
@@ -5817,6 +5900,21 @@ function rfUndoMove() {
   var f = tidyUndoFields(l.applyId, l.target); l.state = "undoing"; render(true);
   rfSend(f, { onDone: function () { delete st.seen[l.sid]; st.last = null; toast("Moved back"); }, onFail: function () { if (st.last === l) l.state = "done"; } });
 }
+/* ----- Sessions home: Needs you / Running / Recent (v15). A row opens its chat in one tap. ----- */
+function sessionsHomeNode(model) {
+  var f = document.createDocumentFragment();
+  if (!model.loaded) return emptyBox("Connecting\u2026", "Waiting for your computers to report in.");
+  var sec = homeSections(uniq(model), function (s) { return sessionMeta(s, S.now, S.peek[s.id]); }, 5), un = rfStackList(uniq(model), false).length;
+  function card(list, need, opts) { var c = h("div", { "class": "tcard" + (need ? " need" : ""), "data-k": opts }); list.forEach(function (s) { c.appendChild(sessionRow(s, need ? { today: true, sub: askText(s) } : { today: true })); }); return c; }
+  f.appendChild(secHead("Needs you \u00b7 " + sec.need.length));
+  f.appendChild(sec.need.length ? card(sec.need, true, "home-need") : h("p", { "class": "cap", "data-k": "home-need-none", text: "Nothing waiting on you." }));
+  f.appendChild(secHead("Running \u00b7 " + sec.run.length));
+  f.appendChild(sec.run.length ? card(sec.run, false, "home-run") : h("p", { "class": "cap", "data-k": "home-run-none", text: "Nothing running." }));
+  f.appendChild(secHead("Recent", h("button", { "class": "btn link", type: "button", "data-k": "rf-browse", onclick: function () { S.rf.sessMode = "browse"; render(true); window.scrollTo(0, 0); }, text: "Browse all chats \u203a" })));
+  f.appendChild(sec.recent.length ? card(sec.recent, false, "home-recent") : h("p", { "class": "cap", text: "No other chats yet." }));
+  if (un) f.appendChild(h("div", { style: "margin-top:14px" }, h("button", { "class": "sortchip", type: "button", "data-k": "rf-tosort", onclick: function () { S.rf.sessMode = "stack"; render(true); window.scrollTo(0, 0); }, text: un + " to sort \u203a" })));
+  return f;
+}
 function sessionsStackNode(model) {
   var f = document.createDocumentFragment(), st = S.rf.stack;
   if (!model.loaded) return emptyBox("Connecting…", "Waiting for your computers to report in.");
@@ -5844,6 +5942,7 @@ function sessionsStackNode(model) {
     f.appendChild(h("div", { "class": "rf-stackwrap" }, card));
     f.appendChild(more);
   }
+  f.appendChild(h("button", { "class": "rf-link rf-blk", type: "button", "data-k": "rf-tohome", onclick: function () { S.rf.sessMode = "home"; render(true); window.scrollTo(0, 0); }, text: "\u2039 Sessions" }));
   f.appendChild(h("button", { "class": "rf-link rf-blk", type: "button", "data-k": "rf-browse", onclick: function () { S.rf.sessMode = "browse"; render(true); window.scrollTo(0, 0); }, text: "Browse all chats ›" }));
   return f;
 }
@@ -5982,9 +6081,154 @@ function rfInit() {
   rfPushRefresh(); rfPushPrefs();
 }
 /* @refocus-ui-end */
+/* ---------- v15 usability fixes: pure rules (no DOM). Tests: tests/v15.test.mjs ---------- */
+/* @pure-start */
+/** Sessions home: Needs you, Running, then the newest few of the rest. metaOf(s) = sessionMeta(...); its cls decides the group. */
+function homeSections(sessions, metaOf, recentN) {
+  var need = [], run = [], rec = [], n = recentN > 0 ? recentN : 5;
+  (Array.isArray(sessions) ? sessions : []).forEach(function (s) {
+    if (!s || s.unverified) return;
+    var c = metaOf(s).cls;
+    if (c === "wait") need.push(s); else if (c === "run") run.push(s); else rec.push(s);
+  });
+  function newest(a, b) { return (isFinite(b.last) ? b.last : 0) - (isFinite(a.last) ? a.last : 0) || (a.id < b.id ? -1 : 1); }
+  need.sort(newest); run.sort(newest); rec.sort(newest);
+  return { need: need, run: run, recent: rec.slice(0, n), recentTotal: rec.length };
+}
+/** A command split so it can only wrap after a "/" or a space, never inside a word: ["rm ", "-rf ", "~/", "iCloud/", ...]. */
+function cmdPieces(text) { return (str(text).match(/[^\/\s]*[\/\s]?/g) || []).filter(Boolean); }
+/** Invisible, control and bidi characters (all but tab, newline and space): shown visibly, never trusted. */
+var CMD_HIDDEN = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u00ad\u061c\u180e\u200b-\u200f\u2028\u2029\u202a-\u202e\u2060-\u206f\ufeff\ufff9-\ufffb]|[\u{e0000}-\u{e007f}]/gu;
+/** The command text for display: identical, except each hidden character becomes a visible marker like <U+202E>. Newlines and tabs stay. */
+function cmdVisible(text) { return str(text).replace(CMD_HIDDEN, function (c) { var n = c.codePointAt(0).toString(16).toUpperCase(); while (n.length < 4) n = "0" + n; return "\u27e8U+" + n + "\u27e9"; }); }
+function cmdLineCount(text) { var t = str(text).replace(/\r\n?/g, "\n").replace(/\n+$/, ""); return t ? t.split("\n").length : 0; }
+/** Plain-English hint for a command, from fixed rules. A hint only: it never decides, gates or styles anything. { text, destructive } (destructive = a rule matched). */
+function cmdExplain(command) {
+  var FALL = "Runs this command on your Mac. Check it line by line.";
+  var c = str(command).replace(/\r\n?|\n/g, " ; ").replace(/\t/g, " "), segs = c.split(/&&|\|\||[;&|`(){}]|\$\(/), targets = [], recursive = false, hints = [], m, k;
+  function base(t) { return str(t).replace(/^["'\\]+|["']+$/g, "").replace(/^.*\//, ""); }
+  function shown(x) {
+    x = str(x).replace(/^["']|["']$/g, "");
+    if (/^(?:\/+\*?|\/\*)$/.test(x)) return "your whole disk";
+    if (/^(?:~\/?\*?|\$HOME\/?\*?|\$\{HOME\}\/?\*?)$/.test(x)) return "your home folder";
+    x = x.replace(/\/+$/, ""); return x.length > 80 ? x.slice(0, 77) + "..." : x;
+  }
+  segs.forEach(function (seg) {
+    var t = seg.trim().split(/\s+/).filter(Boolean), i = 0;
+    while (i < t.length) {
+      var w = base(t[i]);
+      if (/^(?:sudo|doas|command|env|exec|nohup|time|nice|builtin)$/.test(w) || /^\w+=/.test(t[i])) { i++; continue; }
+      if (/^-/.test(t[i]) && i > 0) { i += /^-[ugCpUhrtT]$/.test(t[i]) ? 2 : 1; continue; }
+      break;
+    }
+    var cmd = base(t[i]); if (cmd === "rm") {
+      var a = t.slice(i + 1), end = false;
+      a.forEach(function (x) { if (!end && x === "--") { end = true; return; } if (!end && /^-/.test(x)) { if (/^-[A-Za-z]*[rR]|^--recursive/.test(x)) recursive = true; } else targets.push(x); });
+      if (!a.length) targets.push("");
+    } else if (cmd === "xargs" && /(?:^|\/)rm$/.test(str(t[i + 1]).replace(/^["'\\]+|["']+$/g, "")) ) hints.push("Deletes whatever files are passed to it. This cannot be undone.");
+  });
+  if (/\bfind\b[^;&|`]*(?:-delete\b|-exec\s+(?:\S*\/)?\\?rm\b)/.test(c)) hints.push("Finds files and deletes every match. This cannot be undone.");
+  if (targets.length) {
+    var names = targets.filter(Boolean).map(shown), uniq = names.filter(function (x, n) { return names.indexOf(x) === n; }), more = uniq.length - 3, list = uniq.slice(0, 3).join(", ") + (more > 0 ? " and " + more + " more" : "");
+    if (!uniq.length) list = "files";
+    hints.unshift("Deletes " + (recursive && uniq.length === 1 && uniq[0] !== "your whole disk" && uniq[0] !== "your home folder" ? "the folder " : "") + list + (recursive ? " and everything in " + (uniq.length > 1 ? "them" : "it") : "") + ". This cannot be undone.");
+  }
+  if (/\bgit\s+push\b[^;&|]*(?:--force\b|--force-with-lease\b|\s-f\b|\s\+\S|\s:\S)/.test(c)) hints.push("Overwrites the history on the remote repository. Other people\u2019s work there can be lost.");
+  if (/\bgit\s+reset\s+[^;&|]*--hard\b/.test(c)) hints.push("Throws away every uncommitted change in this project. This cannot be undone.");
+  if (/\bgit\s+clean\b[^;&|]*\s-[A-Za-z]*f/.test(c)) hints.push("Deletes files git is not tracking. This cannot be undone.");
+  if (/\b(?:drop\s+(?:table|database|schema)|truncate\s+table|delete\s+from)\b/i.test(c)) hints.push("Deletes data from a database. This cannot be undone.");
+  if (/\b(?:curl|wget)\b[^;&]*\|\s*(?:sudo\s+)?(?:ba|z)?sh\b/.test(c)) hints.push("Downloads a script from the internet and runs it.");
+  else if (/\|\s*(?:sudo\s+)?(?:ba|z)?sh\b|\|\s*(?:sudo\s+)?(?:python3?|node|perl|ruby)\b/.test(c)) hints.push("Pipes text into a program that runs it.");
+  if (/\bdd\b[^;&|]*\bof=/.test(c)) hints.push("Writes raw data to a file or disk, replacing what is there.");
+  if (/\bdiskutil\s+(?:erase|partition|zero|secure)/i.test(c)) hints.push("Erases or repartitions a disk. This cannot be undone.");
+  if (!hints.length) return { destructive: false, text: FALL };
+  return { destructive: true, text: hints.join(" ") };
+}
+var CH_LEAD = /\b(?:which|choose|pick|prefer|option|options|approach|rather|go with|between|want|like|would you|do you|should|shall|one of)\b/i;
+var CH_Q = /\b(?:which|choose|pick|prefer|option|options|approach|one of|rather|go with|between|how do you want)\b/i;
+var CH_ANCHOR = /\b(?:prefer|want|choose|pick|select|go with|use|like|between|rather have|rather|take|keep)\s+/gi;
+var CH_BAD_START = /^(?:me|you|i|we|to|should|shall|do|does|did|can|could|would|will|is|are|have|has|how|what|why|when|where|who)\b/i;
+var CH_YESNO = /^(?:yes|no|ok|okay|sure|maybe|not now|go ahead|stop|continue)$/i;
+/** One offered option as a short label, or "" when it does not look like one. The label is also the exact reply text. */
+function choiceTidy(x) {
+  if (CMD_HIDDEN.test(str(x))) { CMD_HIDDEN.lastIndex = 0; return ""; } // invisible, zero-width or bidi characters: no pill, so what you see is what is sent
+  CMD_HIDDEN.lastIndex = 0;
+  if (/[\u00a0\u1680\u2000-\u200a\u202f\u205f\u3000]/.test(str(x))) return "";
+  var t = str(x).replace(/\*\*|__|`/g, "").replace(/^[\s"'“‘(]+|[\s"'”’).,;:!?]+$/g, "").replace(/^(?:either|or|and)\s+/i, "").replace(/\s+/g, " ").trim();
+  if ((t.match(/\(/g) || []).length > (t.match(/\)/g) || []).length) t = t.replace(/\s*\([^)]*$/, "").trim();
+  if (!t || t.length > 60 || t.split(" ").length > 8 || CH_BAD_START.test(t) || /[?\n]/.test(t)) return "";
+  return t.charAt(0).toUpperCase() + t.slice(1);
+}
+function choiceFinish(items) {
+  var out = [], seen = Object.create(null);
+  for (var i = 0; i < items.length; i++) {
+    var t = choiceTidy(items[i]); if (!t) return [];
+    var k = t.toLowerCase(); if (seen[k]) return []; seen[k] = true; out.push(t);
+  }
+  if (out.length < 2 || out.length > 5) return [];
+  if (out.every(function (x) { return CH_YESNO.test(x); })) return [];
+  return out;
+}
+/** Rules-based (no AI) reading of a chat's ask: the 2 to 5 options it offers, as short labels, or [] when unsure. Two shapes: a list of options followed by a choice question, or a final question that names the options ("A, B, or C?"). */
+function choicesFrom(text) {
+  var t = str(text).replace(/\r/g, "").replace(/\s+$/g, "").trim();
+  if (!t || t.length > 4000) return [];
+  var lines = t.split("\n"), mk = /^\s*(?:[-*•–]|\d{1,2}[.)]|\(?[A-Ea-e][.)])\s+(.+?)\s*$/, i = lines.length - 1, j;
+  // shape 1: a run of list lines near the end, then (or just before) a choice question
+  while (i >= 0 && !lines[i].trim()) i--;
+  var afterLines = [];
+  while (i >= 0 && !mk.test(lines[i])) { if (lines[i].trim()) afterLines.unshift(lines[i].trim()); if (afterLines.length > 3) break; i--; }
+  if (i >= 0 && mk.test(lines[i]) && afterLines.length <= 3) {
+    var run = []; j = i;
+    while (j >= 0 && mk.test(lines[j])) { run.unshift(mk.exec(lines[j])[1]); j--; }
+    var lead = ""; while (j >= 0 && !lead) { lead = lines[j].trim(); j--; }
+    var after = afterLines.join(" ");
+    var q = /\?/.test(after) ? after : (!after && /(?:\?|:)\s*$/.test(lead)) ? lead : "";
+    if (run.length >= 2 && run.length <= 5 && q && CH_Q.test(q) && after.length <= 300) {
+      var labels = run.map(function (x) { return str(x).split(/\s+[—–-]\s+|:\s+|\s+\(/)[0]; });
+      return choiceFinish(labels);
+    }
+    return [];
+  }
+  // shape 2: the final sentence is a question that names the options
+  var m = /([^.!?\n]*)\?["'”’)]*\s*$/.exec(t); if (!m) return [];
+  var s = m[1].trim(), tail = "", k = s.lastIndexOf(":");
+  if (!s) return [];
+  if (k > 0) { if (!CH_LEAD.test(s.slice(0, k))) return []; tail = s.slice(k + 1); }
+  else {
+    var best = -1, a; CH_ANCHOR.lastIndex = 0;
+    while ((a = CH_ANCHOR.exec(s))) { var rest = s.slice(a.index + a[0].length); if (/\bor\b/i.test(rest)) best = a.index + a[0].length; }
+    if (best >= 0) tail = s.slice(best);
+    else if (s.split(/\s+/).length <= 6 && !CH_BAD_START.test(s)) tail = s;
+    else return [];
+  }
+  if (!/\bor\b/i.test(tail)) return [];
+  return choiceFinish(tail.split(/\s*,\s*or\s+|\s+or\s+|\s*,\s*/i));
+}
+/** The menu's last line: the app release, the Mac bridge build, and whether an update is waiting. rel = { running, state }; bridge = "0.12.3" or "". */
+function versionLine(rel, bridge) {
+  var pv = rel ? (rel.page || rel.running) | 0 : 0, v = pv > 0 ? "App v" + pv : "App version unknown";
+  var b = /^\d{1,6}\.\d{1,6}\.\d{1,6}$/.test(str(bridge)) ? "Mac bridge " + bridge : "Mac bridge version unknown";
+  var st = rel && rel.state === "ready" ? "ready" : rel && rel.state === "refused" ? "refused" : "ok";
+  return { app: v, bridge: b, state: st, word: st === "ready" ? "Update ready" : st === "refused" ? "Update refused" : "up to date" };
+}
+/** Default folder id for a save's action, from the Mac's folder list: KB note -> KnowledgeBase, Make skill -> the skills folder when it is listed, Task (and anything else) -> Home. */
+function saveFolderDefault(act, folders) {
+  var list = Array.isArray(folders) ? folders : [], has = function (id) { return list.some(function (f) { return f.id === id; }); };
+  if (act === "KB note" && has("kb")) return "kb";
+  if (act === "Skill") { var sk = list.filter(function (f) { return /^skills$/i.test(str(f.name)) || f.id === "cs:skills"; })[0]; if (sk) return sk.id; }
+  return has("home") ? "home" : "";
+}
+/** Body scroll lock for open sheets: what to do when the number of open sheets changes. wasLocked, openNow, y = window.scrollY at the moment. */
+function scrollLockPlan(wasLocked, openNow, y) {
+  if (openNow && !wasLocked) return { op: "lock", top: -Math.max(0, y | 0) };
+  if (!openNow && wasLocked) return { op: "unlock" };
+  return { op: "none" };
+}
+/* @pure-end */
 function renderDialog() {
   var host = $("dlgHost");
-  var key = S.ask ? S.ask.title + "|" + S.ask.body : "";
+  var key = S.ask ? S.ask.title + "|" + S.ask.body + "|" + (S.ask.keyExtra || "") : "";
   if (host.getAttribute("data-key") === key) return;
   var wasOpen = host.getAttribute("data-key"), op = S.askOpener;
   host.setAttribute("data-key", key); clear(host);
@@ -5995,15 +6239,18 @@ function renderDialog() {
   }
   var a = S.ask, cancel = null;
   if (!wasOpen) S.askOpener = a.opener || document.activeElement;
-  if (!a.info) cancel = h("button", { "class": "btn", type: "button", onclick: function () { S.ask = null; renderDialog(); if (a.onCancel) a.onCancel(); }, text: "Cancel" });
-  var okBtn = h("button", { "class": "btn" + (a.danger ? " danger" : a.primary ? " primary" : a.info ? "" : " dark"), type: "button", onclick: function () { if (a.keep) { if (a.ok) a.ok(); return; } S.ask = null; renderDialog(); if (a.ok) a.ok(); }, text: a.okLabel });
+  if (!a.info) cancel = h("button", { "class": a.safe ? "btn primary" : "btn plain", type: "button", "data-k": "dlg-cancel", onclick: function () { S.ask = null; renderDialog(); if (a.onCancel) a.onCancel(); }, text: a.cancelLabel || "Cancel" });
+  // v15 one button system: the forward action is filled blue; Cancel is plain; a risky Allow is outlined red; archive-style destructive stays red. a.safe = the safe choice (Not now / Deny) is the filled one.
+  var okCls = a.danger ? "btn danger" : a.risk ? "btn risk" : a.info ? "btn" : a.safe ? "btn plain" : "btn primary";
+  var okBtn = h("button", { "class": okCls, type: "button", "data-k": "dlg-ok", onclick: function () { if (a.keep) { if (a.ok) a.ok(); return; } S.ask = null; renderDialog(); if (a.ok) a.ok(); }, text: a.okLabel });
   a.btn = okBtn;
-  var scrim = h("div", { "class": "scrim" + (a.sheet ? " qcf" : "") }, h("div", { "class": "dlg" + (a.sheet ? " qcfb" : ""), role: a.info ? "dialog" : "alertdialog", "aria-modal": "true", "aria-labelledby": "dlgTitle", "aria-describedby": a.body ? "dlgBody" : null },
-    h("h2", { id: "dlgTitle", text: a.title }), a.body ? h("p", { id: "dlgBody", text: a.body }) : null, a.node || null,
-    h("div", { "class": "bt" }, cancel, okBtn)));
+  var bt = h("div", { "class": "bt" }, cancel, okBtn);
+  var dlg = h("div", { "class": "dlg" + (a.sheet ? " qcfb" : "") + (a.top ? " top" : ""), role: a.info ? "dialog" : "alertdialog", "aria-modal": "true", "aria-labelledby": "dlgTitle", "aria-describedby": a.body ? "dlgBody" : null, tabindex: "-1" },
+    h("h2", { id: "dlgTitle", text: a.title }), a.top ? bt : null, a.body ? h("p", { id: "dlgBody", text: a.body }) : null, a.node || null, a.top ? null : bt);
+  var scrim = h("div", { "class": "scrim" + (a.sheet ? " qcf" : "") }, dlg);
   scrim.addEventListener("keydown", function (e) { trapTab(e, scrim); if (a.keep && e.key === "Enter" && e.target && e.target.tagName === "INPUT") { e.preventDefault(); if (a.ok) a.ok(); } }); // Return submits
   host.appendChild(scrim);
-  (a.focusEl || cancel || okBtn).focus();
+  (a.focusEl || (a.info ? okBtn : dlg)).focus(); // never the Cancel button: it would carry the focus ring and Return would cancel
 }
 
 /* =====================================================================
@@ -6314,6 +6561,7 @@ function init() {
   window.addEventListener("online", wakeDb);
   setInterval(assistTick, 1000);
   setInterval(function () { checkRefresh(); checkSendWatch(); checkReqWatch(); checkPairWatch(); render(); autoRefresh(300000); }, 5000); // re-check online / offline (30 s rule) and ages
+  watchSheets();
   render(true);
   connect();
 }

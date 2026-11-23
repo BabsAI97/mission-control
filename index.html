@@ -588,6 +588,15 @@ body.is-dragging #mc-archive{scale:1.1;outline:2px dashed var(--archStrong);outl
 .qtbar .qbtn2{flex:none;width:120px}
 .qmvl{display:flex;flex-direction:column;gap:6px;margin-bottom:6px;max-height:50vh;overflow-y:auto}
 .qmv{width:100%;min-height:48px;border-radius:12px;border:0;background:var(--fill);color:var(--text);font:inherit;text-align:left;padding:10px 14px;cursor:pointer;display:flex;justify-content:space-between;gap:8px;overflow-wrap:anywhere}
+/* v15: the command box (also used by the decision sheet) */
+.cmdask{display:flex;flex-direction:column;gap:6px}
+.cmdcap{font-size:14px;line-height:19px;color:var(--text3);margin-top:6px}
+.cmdbox{font-family:ui-monospace,Menlo,monospace;font-size:14px;line-height:21px;background:var(--bg);border:1px solid var(--line2);border-radius:10px;padding:10px 12px;margin-top:6px;color:var(--text);white-space:pre-wrap;overflow-wrap:normal;word-break:normal;tab-size:4;max-height:40vh;overflow:auto}
+.cmdbox .nw{white-space:pre-wrap;overflow-wrap:anywhere}
+.cmdwrap{display:flex;flex-direction:column}
+.cmdlines{font-size:13px;line-height:18px;font-weight:600;color:var(--bad);margin-top:6px}
+.cmdwhat{display:flex;gap:8px;align-items:flex-start;border-radius:10px;padding:8px 10px;margin-top:8px;font-size:14px;line-height:19px;font-weight:600;color:var(--text2);background:var(--fill)}
+.cmdwhat.bad{background:var(--badBg);color:var(--bad)}
 /* @quick-css-end */
 /* @refocus-css-start */
 /* Refocus (Decide, Autopilot, card stack, Saves): mock mocks/refocus-v2.html, built with this app's tokens. Tap targets are 44 px or more. */
@@ -720,6 +729,40 @@ body.is-dragging #mc-archive{scale:1.1;outline:2px dashed var(--archStrong);outl
 .rf-gate .rf-acts{margin-top:16px}
 @media (prefers-reduced-motion: reduce){.rf-bar>i,.rf-pbar>i{transition:none}}
 /* @refocus-css-end */
+/* @v15-css-start */
+/* ===== v15 usability fixes: one button system, yes screens, command box, pills, scroll lock ===== */
+body.sheet-lock{position:fixed;left:0;right:0;width:100%;overflow:hidden}
+.fsheet .log,.qbody,.rf-body2,.dlg,.menu{overscroll-behavior:contain}
+.fscrim,.qscrim,.rf-scrim,.scrim,.scrim2{touch-action:none}
+.btn.plain,.rf-btn.plain{background:transparent;border:1px solid var(--line2);color:var(--text)}
+.btn.risk,.qbtn2.risk,.rf-btn.risk{background:transparent;border:2px solid var(--bad);color:var(--bad)}
+.qbtn2.sec{border:1px solid var(--line2);color:var(--text)}
+.dlg:focus,.dlg:focus-visible{outline:none}
+.dlg .bt .btn{min-height:44px;border-radius:12px;padding:0 18px}
+.dlg.top .bt{flex-wrap:nowrap;justify-content:stretch;margin:2px 0 6px}
+.dlg.top .bt .btn{flex:1;min-height:50px;font-size:17px}
+.dlg.qcfb .bt .btn.plain{background:transparent;color:var(--text)}
+.dlg.qcfb .bt .btn.primary{background:var(--accent);color:#fff}
+.dlg.qcfb .bt .btn.risk{background:transparent;color:var(--bad)}
+.dlg .quote{background:var(--fill);border-radius:12px;padding:12px;font-size:16px;line-height:22px;color:var(--text);white-space:pre-wrap;overflow-wrap:anywhere;max-height:40vh;overflow-y:auto}
+.rf-acts.top{margin:4px 0 12px;flex-wrap:nowrap}.rf-acts.top .rf-btn{flex:1;min-height:50px;font-size:17px}
+.fcomp .send{width:auto;min-width:72px;padding:0 20px;border-radius:22px;font-size:16px;font-weight:600;line-height:20px}
+.pills{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 10px}
+.cpill{min-height:44px;max-width:100%;padding:8px 16px;border-radius:22px;border:1px solid var(--accent);background:var(--accentSoft);color:var(--accentText);font:inherit;font-size:15px;line-height:20px;font-weight:600;cursor:pointer;text-align:left;overflow-wrap:anywhere}
+.cpill:active{opacity:.6}
+.rf-ansbox .pills{margin-bottom:8px}
+.sortchip{display:inline-flex;align-items:center;min-height:44px;padding:0 14px;border-radius:22px;background:var(--fill);border:0;font-size:14px;font-weight:600;color:var(--accentText);cursor:pointer}
+.sh .btn.link{min-height:36px}
+.chg{color:var(--waitTx);font-weight:600}
+.dlg .startbox label.cap.chg{color:var(--waitTx)}
+.ver{margin:6px 16px 8px;border-top:.5px solid var(--line);padding-top:10px;font-size:14px;line-height:19px;color:var(--text2)}
+.ver .vw{font-weight:700}.ver .vw.ok{color:var(--ok)}.ver .vw.ready{color:var(--accentText)}.ver .vw.refused{color:var(--bad)}
+.ver .btn{min-height:44px;margin-top:8px;width:100%;border-radius:12px;font-size:16px}
+#moreBtn.udot::before{content:"";position:absolute;top:2px;right:2px;width:10px;height:10px;border-radius:50%;background:var(--accent);border:2px solid var(--bg);z-index:1}
+@media (hover:none){.swrow .act{opacity:1}}
+.tcard .swrow .lrow .tx{padding-right:40px}
+.tcard .swrow .lrow .tx{min-width:0}.tcard .swrow .lrow .s{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+/* @v15-css-end */
 </style>
 </head>
 <body>
