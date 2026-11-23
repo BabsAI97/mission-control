@@ -691,7 +691,7 @@ function requestBody(f, id, iso) {
   // r3: a start of kind command / saved carries ONLY the command key or the saved prompt's id: no title, no prompt, no project (the Mac refuses any text for these kinds)
   if (f.action === "start" && f.kind === "command") { body.kind = "command"; body.command = f.command; }
   else if (f.action === "start" && f.kind === "saved") { body.kind = "saved"; body.savedId = f.savedId; }
-  else if (f.action === "start") { body.title = f.title; body.prompt = f.prompt; body.kind = f.kind; body.project = f.project == null ? null : f.project; }
+  else if (f.action === "start") { body.title = f.title; body.prompt = f.prompt; body.kind = f.kind; body.project = f.project == null ? null : f.project; if (f.folderId && FOLDER_ID_RE.test(str(f.folderId))) body.folderId = f.folderId; }
   return body;
 }
 /** "Expires HH:MM" for a pending send (status new, with ttlSec); "Expired" once past; "" otherwise. ttlSec is clamped to 10-3600 like the bridge does. */
@@ -710,7 +710,7 @@ function derive() {
     if (m) { t = Date.parse(m.lastSeen); online = !isNaN(t) && (S.now - t) < ONLINE_MS; }
     var verified = !S.sig || S.sig["machines/" + n] === "ok", heldKey = !!(typeof DEV !== "undefined" && DEV.macKeys && DEV.macKeys[n]), mine = m && (verified || heldKey) ? mapSessions(m.sessions, n, online, S.now, S.titles, !verified) : [];
     mstat[n] = { exists: !!m, online: online, lastSeen: t, version: m ? str(m.version) : "", mode: m ? str(m.mode) : "", pairing: m && m.pairing === "paired" ? "paired" : "none", total: m && isFinite(Number(m.total)) ? Number(m.total) : null,
-      pairLocked: !!m && m.pairLocked === true, devicePaired: false, verified: verified, sigState: (S.sig && S.sig["machines/" + n]) || "pending", usage: m && verified ? cleanUsage(m.usage) : null, caps: cleanCaps(m && m.caps), startReason: verified && m && m.startReason === "not enabled" ? "starting is off on the Mac" : "", assistant: cleanAssistant(m && m.assistant), devices: verified ? cleanDevices(m && m.devices) : [], quotaWarn: verified ? cleanQuotaWarn(m && m.quotaWarn) : "", saved: verified ? cleanSaved(m && m.saved) : [], away: verified ? cleanAway(m && m.away) : cleanAway(null), keepAwake: verified ? cleanKeepAwake(m && m.keepAwake) : cleanKeepAwake(null), pending: verified ? cleanPending(m && m.pending) : [], rf: verified ? cleanRefocus(m, n) : cleanRefocus(null, n), tidy: verified ? cleanTidy(m && m.tidy) : cleanTidy(null), configLoadedAt: verified && m ? str(m.configLoadedAt).slice(0, 40) : "", lastError: m ? str(m.lastError) : "", lastErrorAt: m ? Date.parse(m.lastErrorAt) : NaN, shown: mine.length };
+      pairLocked: !!m && m.pairLocked === true, devicePaired: false, verified: verified, sigState: (S.sig && S.sig["machines/" + n]) || "pending", usage: m && verified ? cleanUsage(m.usage) : null, caps: cleanCaps(m && m.caps), folders: verified ? cleanFolders(m && m.folders) : [], startLimit: cleanStartLimit(verified && m ? m.startLimit : null), startReason: verified && m && m.startReason === "not enabled" ? "starting is off on the Mac" : "", assistant: cleanAssistant(m && m.assistant), devices: verified ? cleanDevices(m && m.devices) : [], quotaWarn: verified ? cleanQuotaWarn(m && m.quotaWarn) : "", saved: verified ? cleanSaved(m && m.saved) : [], away: verified ? cleanAway(m && m.away) : cleanAway(null), keepAwake: verified ? cleanKeepAwake(m && m.keepAwake) : cleanKeepAwake(null), pending: verified ? cleanPending(m && m.pending) : [], rf: verified ? cleanRefocus(m, n) : cleanRefocus(null, n), tidy: verified ? cleanTidy(m && m.tidy) : cleanTidy(null), configLoadedAt: verified && m ? str(m.configLoadedAt).slice(0, 40) : "", lastError: m ? str(m.lastError) : "", lastErrorAt: m ? Date.parse(m.lastErrorAt) : NaN, shown: mine.length };
     if (!m) return;
     buildTree(m.tree, tree);
     mine.forEach(function (x) { sessions.push(x); });
@@ -719,7 +719,7 @@ function derive() {
   var gs = groupSessions(sessions, tree), groups = gs.groups, gmap = gs.gmap;
   var sig = JSON.stringify([sessions.map(function (s) { return [s.id, s.title, s.status, s.pinned, s.waiting, s.machine, s.online, s.group, s.sub, Math.floor(s.last / 60000), s.waitKind, s.ask, s.stuckFor, s.rc, s.sched]; }),
     groups.map(function (g) { return [g.id, g.name, g.subs.map(function (x) { return x.name; })]; }),
-    NAMES.map(function (n) { return [mstat[n].exists, mstat[n].online, mstat[n].mode, mstat[n].total, mstat[n].shown, mstat[n].caps, mstat[n].lastError, mstat[n].saved, mstat[n].configLoadedAt, mstat[n].away, mstat[n].keepAwake, mstat[n].pending, mstat[n].tidy]; })]);
+    NAMES.map(function (n) { return [mstat[n].exists, mstat[n].online, mstat[n].mode, mstat[n].total, mstat[n].shown, mstat[n].caps, mstat[n].lastError, mstat[n].saved, mstat[n].folders, mstat[n].startLimit, mstat[n].configLoadedAt, mstat[n].away, mstat[n].keepAwake, mstat[n].pending, mstat[n].tidy]; })]);
   var neverSeen = S.machines.Mac === null && S.machines.PC === null;
   var loaded = S.machines.Mac !== undefined && S.machines.PC !== undefined;
   var byId = Object.create(null); // a session listed by both computers belongs to the one seen most recently (same rule as pickTarget)
@@ -1197,7 +1197,7 @@ function startFields(kind, save, o) {
   if (kind === "research") { title = "Research: " + qline(save.title); p = "Research this saved post in more depth. Find the original source, check its main claims, and tell me what is useful and what is not, with links. Do not install or change anything.\n\n" + q; }
   else if (kind === "skill-install") { title = "Install skill: " + (o.skill || qline(save.title)); p = "The saved post below mentions a skill" + (o.skill ? " called “" + qline(o.skill) + "”" : " or skills") + ". Find it, then follow the install safety steps. Do not install anything until I say yes in this session.\n\n" + q; }
   else { kind = "plain"; title = "Save: " + qline(save.title); p = (str(o.prompt).trim() || "Look at this saved post and tell me what is worth doing with it.") + "\n\n" + q; }
-  return { action: "start", target: o.target, title: title.slice(0, 80), prompt: p.slice(0, 4000), project: o.project ? str(o.project) : null, kind: kind, ttlSec: START_TTL_SEC };
+  return Object.assign({ action: "start", target: o.target, title: title.slice(0, 80), prompt: p.slice(0, 4000), project: o.project && !o.folderId ? str(o.project) : null, kind: kind, ttlSec: START_TTL_SEC }, o.folderId && FOLDER_ID_RE.test(str(o.folderId)) ? { folderId: str(o.folderId) } : {});
 }
 /** One row open at a time (Saves, Activity): tap the open one to close it. */
 function toggleOne(cur, id) { return cur === id ? null : id; }
@@ -1207,7 +1207,7 @@ function retryFields(r, machines) {
   if (r.action === "send") return sendFields(r.sessionId, str(r.text), machines);
   if (r.action === "archive") return archiveFields(r.sessionId, machines);
   if (r.action === "restore") return restoreFields(r.sessionId, r.target || r.machine || pickTarget(r.sessionId, machines));
-  if (r.action === "start" && (r.kind === "plain" || r.kind === "research" || r.kind === "skill-install")) return { action: "start", target: r.target, title: str(r.title).slice(0, 80), prompt: str(r.prompt).slice(0, 4000), project: r.project ? str(r.project) : null, kind: r.kind, ttlSec: START_TTL_SEC };
+  if (r.action === "start" && (r.kind === "plain" || r.kind === "research" || r.kind === "skill-install")) return Object.assign({ action: "start", target: r.target, title: str(r.title).slice(0, 80), prompt: str(r.prompt).slice(0, 4000), project: r.project ? str(r.project) : null, kind: r.kind, ttlSec: START_TTL_SEC }, FOLDER_ID_RE.test(str(r.folderId)) ? { folderId: str(r.folderId) } : {});
   return null;
 }
 /** Retry button for a failed request: show = it can be retried at all; ok = the computer can take it now (start and restore need an online computer with the right cap). */
@@ -1235,6 +1235,7 @@ function activityDetails(r, sessionTitle) {
   var out = [["What", ({ send: "Reply", archive: "Archive", list: "Refresh", peek: "Peek", start: "Start session", restore: "Restore", "agent-save": "Save agent", "agent-run": "Run agent", "agent-toggle": "Agent on/off", "research-now": "Research", pair: "Pair device", unpair: "Remove device", "away-set": "Away mode", "perm-answer": "Permission answer", "q-answer": "Question answer", "keep-awake": "Keep awake", "tidy-refresh": "Tidy refresh", "tidy-apply": "Tidy", "tidy-undo": "Undo Tidy" })[r.action] || str(r.action)], ["Status", str(r.status)]];
   if (sessionTitle) out.push(["Session", sessionTitle]);
   if (r.action === "start" && r.title) out.push(["Title", str(r.title)]);
+  if (r.action === "start" && FOLDER_ID_RE.test(str(r.folderId))) out.push(["Folder", str(r.folderId) === "home" ? "Home folder" : str(r.folderId) === "kb" ? "KnowledgeBase" : str(r.folderId).slice(3)]);
   if (r.machine || r.target) out.push(["Computer", str(r.machine || r.target)]);
   if (r.action === "send" && r.text) out.push(["Sent text", str(r.text)]);
   if (r.action === "start" && r.prompt) out.push(["Prompt", str(r.prompt)]);
@@ -1343,7 +1344,7 @@ function assistSetupFields(target) { return { action: "start", target: target, t
 /** Start request built from an assistant "start" card: your confirmed text, plain kind. */
 function assistStartFields(text, o) {
   var t = str(text).trim();
-  return { action: "start", target: o.target, title: ("Assistant: " + t.replace(/\s+/g, " ")).slice(0, 80), prompt: t.slice(0, 4000), project: o.project ? str(o.project) : null, kind: "plain", ttlSec: START_TTL_SEC };
+  return Object.assign({ action: "start", target: o.target, title: ("Assistant: " + t.replace(/\s+/g, " ")).slice(0, 80), prompt: t.slice(0, 4000), project: o.project && !o.folderId ? str(o.project) : null, kind: "plain", ttlSec: START_TTL_SEC }, o.folderId && FOLDER_ID_RE.test(str(o.folderId)) ? { folderId: str(o.folderId) } : {});
 }
 /* ---------- device pairing (contract v0.7) ---------- */
 /** The pairing code as the Mac shows it (16 Crockford base32 characters, grouped 4-4-4-4). Typed forms are accepted: any case, spaces and dashes, O folds to 0, I and L fold to 1. "" = not a valid code. */
@@ -1840,6 +1841,44 @@ function cleanSaved(list) {
   });
   return out;
 }
+/* v0.12.2 start-folder picker. The Mac publishes ids and display names only (never a path); the request carries the id, which is inside the signed body. */
+var FOLDER_ID_RE = /^(?:home|kb|cs:[A-Za-z0-9][A-Za-z0-9._-]{0,59})$/, FOLDERS_MAX = 80, FOLDER_KEY = "mc-start-folder-v1";
+/** The heartbeat's folder list: id + name, at most 80, ids of the three known shapes only, no repeats. Order: Default (home) first, KnowledgeBase, then the rest by name. */
+function cleanFolders(list) {
+  var seen = Object.create(null), rest = [], head = [];
+  (Array.isArray(list) ? list : []).forEach(function (x) {
+    if (!x || typeof x !== "object" || !FOLDER_ID_RE.test(str(x.id)) || seen[x.id]) return;
+    var name = apStr(x.name, 60); if (!name) return;
+    seen[x.id] = true;
+    if (x.id === "home") head[0] = { id: "home", name: "Default folder (home)" };
+    else if (x.id === "kb") head[1] = { id: "kb", name: name };
+    else rest.push({ id: x.id, name: name });
+  });
+  rest.sort(function (a, b) { var A = a.name.toLowerCase(), B = b.name.toLowerCase(); return A < B ? -1 : A > B ? 1 : 0; });
+  return head.filter(Boolean).concat(rest).slice(0, FOLDERS_MAX);
+}
+/** The Mac's burst fuse as the heartbeat says it (startLimit {max, minutes}); an older Mac gets the constants the bridge has had since v0.7 (5 in 10 minutes). */
+function cleanStartLimit(x) {
+  var max = x && typeof x === "object" ? Math.floor(Number(x.max)) : NaN, mins = x && typeof x === "object" ? Math.floor(Number(x.minutes)) : NaN;
+  return { max: max >= 1 && max <= 99 ? max : 5, minutes: mins >= 1 && mins <= 120 ? mins : 10 };
+}
+function startLimitText(x) { var l = cleanStartLimit(x); return "Up to " + l.max + " starts in any " + l.minutes + " minutes."; }
+/** The Folder <select> of a start sheet. With the Mac's folder list: Default (home), KnowledgeBase, ClaudeSync folders, and the last choice on this phone when it is still listed.
+ *  Without a list (older Mac): the old Project picker. */
+function folderPicker(folders, remembered, groups) {
+  if (folders && folders.length) {
+    var sel = h("select", { "class": "sel", "aria-label": "Folder", "data-k": "start-folder" });
+    var pick = folders.some(function (f) { return f.id === remembered; }) ? remembered : "home";
+    folders.forEach(function (f) { sel.appendChild(h("option", { value: f.id, text: f.name })); });
+    sel.value = pick;
+    return sel;
+  }
+  var ps = h("select", { "class": "sel", "aria-label": "Project", "data-k": "start-project" }, h("option", { value: "", text: "Default folder" }));
+  (groups || []).forEach(function (g) { if (g.id !== "unsorted") ps.appendChild(h("option", { value: g.id, text: g.name })); });
+  return ps;
+}
+/** What a start request takes from the picker: { folderId } for the Mac's list, { project } for the old picker. */
+function pickerFields(sel) { return sel && sel.getAttribute("data-k") === "start-folder" && FOLDER_ID_RE.test(str(sel.value)) ? { folderId: sel.value, project: "" } : { project: sel ? sel.value : "" }; }
 /** Where an r3 request goes: an online, verified computer this device is paired with whose bridge says caps.quick (Mac first). reason explains a disabled button. */
 function quickGate(mstat) {
   var online = NAMES.filter(function (n) { return mstat && mstat[n] && mstat[n].exists && mstat[n].online; });
@@ -1945,6 +1984,10 @@ Object.assign(BRIDGE_ERRORS, {
   "bad saved id": "The Mac doesn\u2019t know that saved prompt.",
   "no such saved prompt": "That saved prompt is no longer on the Mac\u2019s list.",
   "saved prompts unavailable": "The Mac could not read its saved prompts.",
+  "unknown-folder": "That folder is not on the Mac\u2019s list any more. Pick another folder.",
+  "bad folder": "The Mac refused that folder choice.",
+  "folder outside home": "The Mac refused that folder: it is outside your home folder.",
+  "folder unavailable": "That folder could not be opened on the Mac.",
   "restart needed": "Restart needed: that change needs /reload-plugins at the Mac. Nothing was changed.",
   "still working": "It started working again, so it was not archived.",
   "scheduled task": "It belongs to a scheduled task, so it was not archived.",
@@ -2656,6 +2699,7 @@ async function createRequest(f, opts) {
   if (f.action === "research-now" && (!str(f.question).trim() || str(f.question).length > 1000 || !f.target)) { toast("That research request is incomplete, so nothing was sent."); return false; }
   var fixedStart = f.action === "start" && (f.kind === "command" || f.kind === "saved"); // r3: no title or prompt to check: the Mac holds both
   if (fixedStart && (!f.target || (f.kind === "command" ? !QA_COMMANDS.some(function (c) { return c.cmd === f.command && c.cmd !== "gn"; }) : !/^[a-z0-9-]{1,40}$/.test(str(f.savedId))))) { toast("That start request is incomplete, so nothing was sent."); return false; }
+  if (f.action === "start" && f.folderId !== undefined && !FOLDER_ID_RE.test(str(f.folderId))) { toast("That folder looks wrong, so nothing was sent."); return false; }
   if (f.action === "start" && !fixedStart && (!str(f.title).trim() || !str(f.prompt).trim() || !f.target)) { toast("That start request is incomplete, so nothing was sent."); return false; }
   if (f.action === "answer" && (!str(f.text).trim() || str(f.text).length > 4000)) { toast("That answer is empty or too long, so nothing was sent."); return false; }
   if (f.action === "reload-config" && !f.target) { toast("No computer to reload, so nothing was sent."); return false; }
@@ -2704,7 +2748,7 @@ async function doSend(s, text, queued, about, quiet) {
   var t = str(text).trim();
   if (!t) return;
   var gdS = typeof rfGatedDecFor === "function" ? rfGatedDecFor(s.id, "", s.machine) : null;
-  if (gdS) { toast("This chat is waiting on a yes screen first. Open it from Decide."); rfOpenDec(gdS.id, null); return; }
+  if (gdS) { rfReplyViaYes(s.id, s.machine, t, false, gdS); return; } // fallback: the check in askSend normally catches this first
   var r = await guarded("send:" + s.id, function () { return createRequest(sendFields(s.id, t, S.machines, about, about !== undefined && S.assistInfo && S.assistInfo.id === s.id ? S.assistInfo.machine : "")); });
   if (r === undefined) return;
   if (r) {
@@ -3345,12 +3389,22 @@ function checkReqWatch() {
     } else if (Date.now() - w.at > 300000) { delete S.reqWatch[id]; toast(REQ_LABEL[a] + ": no answer from your Mac in 5 min. Is it awake?"); }
   });
 }
+/** A plain send the Mac refused with gate-needs-yes (its yes screen has not reached the phone yet): put the text back in the draft and say what to expect. True when it was that refusal. */
+function sendNeedsYes(r) {
+  if (!/gate-needs-yes/.test(str(r && r.error))) return false;
+  var sid = str(r.sessionId), t = str(r.text);
+  if (sid && t && !str(S.drafts[sid]).trim()) S.drafts[sid] = t;
+  var box = sid && S.focus === sid && document.querySelector ? document.querySelector('[data-k="freply"]') : null; if (box && !box.value) box.value = t;
+  toast("Waiting for this chat\u2019s yes screen \u2014 it\u2019ll appear in Decide within a few seconds. Your reply is kept.");
+  return true;
+}
 function checkSendWatch() {
   Object.keys(S.sendWatch).forEach(function (rid) {
     var r = S.requests.filter(function (x) { return x.id === rid; })[0];
     if (r && (r.status === "done" || r.status === "error")) {
       delete S.sendWatch[rid];
-      if (r.status === "error") toast("Reply not delivered: " + str(r.error || "unknown error")); else { var o = sendOutcome(r); if (o) toast(o); }
+      if (r.status === "error" && sendNeedsYes(r)) { /* the Mac wants a yes screen first: keep the words, show nothing raw */ }
+      else if (r.status === "error") toast("Reply not delivered: " + str(r.error || "unknown error")); else { var o = sendOutcome(r); if (o) toast(o); }
     } else if (Date.now() - S.sendWatch[rid] > 300000) delete S.sendWatch[rid];
   });
 }
@@ -3498,15 +3552,14 @@ function doAction(c, key) {
   if (c.type === "start") {
     var gate = startGate(S.model.mstat); if (!gate.ok) { toast("Can't start a session: " + gate.reason + "."); return; }
     var sel = projectPicker(), ta = h("textarea", { "class": "ta", "aria-label": "Prompt", maxlength: "4000", text: c.text });
-    S.ask = { title: "Start this session?", okLabel: "Start session", body: "On " + gate.target + ". The assistant suggested this prompt; you can edit it. Nothing starts until you confirm.", node: h("div", { "class": "startbox" }, ta, h("label", { "class": "cap", text: "Project" }), sel),
-      ok: function () { var f = assistStartFields(ta.value, { target: gate.target, project: sel.value }); if (!f.prompt.trim()) return; createRequest(f).then(function (id) { if (id) { setCard(key, "req:" + id); toast("Sending to your Mac\u2026"); render(true); } }); } };
+    S.ask = { title: "Start this session?", okLabel: "Start session", body: "On " + gate.target + ". The assistant suggested this prompt; you can edit it. Nothing starts until you confirm.", node: h("div", { "class": "startbox" }, ta, h("label", { "class": "cap", text: sel.getAttribute("data-k") === "start-folder" ? "Folder" : "Project" }), sel),
+      ok: function () { var f = assistStartFields(ta.value, Object.assign({ target: gate.target }, pickerFields(sel))); if (f.folderId) lsSet(FOLDER_KEY, f.folderId); if (!f.prompt.trim()) return; createRequest(f).then(function (id) { if (id) { setCard(key, "req:" + id); toast("Sending to your Mac\u2026"); render(true); } }); } };
     renderDialog();
   }
 }
 function projectPicker() {
-  var sel = h("select", { "class": "sel", "aria-label": "Project", "data-k": "start-project" }, h("option", { value: "", text: "Default folder" }));
-  S.model.groups.forEach(function (g) { if (g.id !== "unsorted") sel.appendChild(h("option", { value: g.id, text: g.name })); });
-  return sel;
+  var gt = startGate(S.model.mstat), tm = (gt.ok && S.model.mstat[gt.target]) || {};
+  return folderPicker(tm.folders, lsGet(FOLDER_KEY), S.model.groups);
 }
 function openAssistSetup(target) {
   if (!target) { toast("Can't set up the assistant right now."); return; }
@@ -4234,15 +4287,15 @@ function saveRow(it, model, verified) {
 function openStart(kind, save, skill, preset, out) {
   var model = S.model, gate = startGate(model.mstat);
   if (!gate.ok) { toast("Can't start a session: " + gate.reason + "."); return; }
-  var sel = h("select", { "class": "sel", "aria-label": "Project", "data-k": "start-project" }, h("option", { value: "", text: "Default folder" }));
-  model.groups.forEach(function (g) { if (g.id !== "unsorted") sel.appendChild(h("option", { value: g.id, text: g.name })); });
+  var tm = model.mstat[gate.target] || {}, sel = folderPicker(tm.folders, lsGet(FOLDER_KEY), model.groups);
   var ta = kind === "plain" ? h("textarea", { "class": "ta", "aria-label": "Prompt", maxlength: "1500", text: preset || "Look at this saved post and tell me what is worth doing with it." }) : null;
   var preview = h("div", { "class": "pv", text: startFields(kind, save, { target: gate.target, skill: skill, prompt: "" }).prompt.split("\n\n").slice(kind === "plain" ? 1 : 0).join("\n\n") });
   var node = h("div", { "class": "startbox" }, ta ? h("label", { "class": "cap", text: "Your prompt" }) : null, ta, h("div", { "class": "cap", text: ta ? "The saved post goes in as quoted data:" : "Fixed brief (the saved post is quoted data):" }), preview,
-    h("label", { "class": "cap", text: "Project" }), sel, h("div", { "class": "cap", text: "At most 3 sessions can be started per computer per day." }));
+    h("label", { "class": "cap", text: sel.getAttribute("data-k") === "start-folder" ? "Folder" : "Project" }), sel, h("div", { "class": "cap", text: startLimitText(tm.startLimit) }));
   S.ask = { title: kind === "research" ? "Research this save?" : kind === "skill-install" ? "Install this skill?" : "Start a session with this save?", okLabel: "Start session", body: "On " + gate.target + ". Nothing starts until you confirm.", node: node,
     ok: function () {
-      var f = startFields(kind, save, { target: gate.target, skill: skill, prompt: ta ? ta.value : "", project: sel.value });
+      var f = startFields(kind, save, Object.assign({ target: gate.target, skill: skill, prompt: ta ? ta.value : "" }, pickerFields(sel)));
+      if (f.folderId) lsSet(FOLDER_KEY, f.folderId);
       createRequest(f).then(function (id) { if (id) { toast("Sending to your Mac\u2026"); if (out) rfSaveMark(save, out); } });
     } };
   renderDialog();
@@ -4299,7 +4352,7 @@ function openRetry(r, f) {
   if (f.sessionId) rows.push(["Session", (s ? s.title : "not listed") + " (" + f.sessionId + ")"]);
   if (f.target) rows.push(["Computer", f.target]);
   if (f.title) rows.push(["Title", f.title]);
-  if (f.kind) rows.push(["Kind", f.kind + (f.project ? " \u00b7 project " + f.project : "")]);
+  if (f.kind) rows.push(["Kind", f.kind + (f.project ? " \u00b7 project " + f.project : "") + (f.folderId ? " \u00b7 folder " + (f.folderId === "home" ? "home" : f.folderId === "kb" ? "KnowledgeBase" : f.folderId.slice(3)) : "")]);
   var node = h("div", { "class": "startbox" }, rows.map(function (x) { return h("div", { "class": "cap", text: x[0] + ": " + x[1] }); }));
   var full = f.action === "start" ? str(f.prompt) : f.text ? str(f.text) : "";
   if (full) node.appendChild(h("div", { "class": "pv", style: "max-height:240px", tabindex: "0", role: "region", "aria-label": "Full message", text: full }));
@@ -4565,6 +4618,8 @@ var QUICK_REPLIES = ["Yes, go ahead", "No, stop", "Do what you recommend"];
 function askSend(s, text) {
   var t = str(text).trim(), run = s.status === "running";
   if (!t || S.busy["send:" + s.id]) return;
+  var gdA = typeof rfGatedDecFor === "function" ? rfGatedDecFor(s.id, "", s.machine) : null;
+  if (gdA) { rfReplyViaYes(s.id, s.machine, t, false, gdA); return; } // a gated chat is never sent a plain reply: straight to its yes screen, with this text
   S.ask = { title: run ? "Queue this reply?" : "Send this reply?", okLabel: run ? "Queue" : "Send", body: "To “" + s.title + "” on " + s.machine + ":\n\n“" + t + "”\n\n" + (run ? "Claude is working. Your message waits 5 seconds (you can undo), then Claude reads it after the current step." : "It goes into the session as your message."),
     ok: function () { if (run) queueReply(s, t); else doSend(s, t); } };
   renderDialog();
@@ -4804,6 +4859,8 @@ function quickPerm(c, decision) {
 }
 /** Answer here: stop the question, then send the text (one signed `answer` request). The card turns green only when the Mac says it is done. */
 function quickAnswer(c, t) {
+  var gdN = typeof rfGatedDecFor === "function" ? rfGatedDecFor(c.id, "", c.machine) : null;
+  if (gdN) { rfReplyViaYes(c.id, c.machine, t, true, gdN); return; }
   quickAsk(quickConfirm("ans", { title: c.title }), function () {
     createRequest(answerFields(c.id, t, S.machines), { noWatch: true }).then(function (rid) {
       if (!rid) return;
@@ -4812,6 +4869,8 @@ function quickAnswer(c, t) {
   });
 }
 function quickReply(c, t) {
+  var gdQ = typeof rfGatedDecFor === "function" ? rfGatedDecFor(c.id, "", c.machine) : null;
+  if (gdQ) { rfReplyViaYes(c.id, c.machine, t, true, gdQ); return; }
   // fix round 1: no confirm sheet here, as in the mock: a reply is the chat's next message and stops nothing ("Answer here" keeps its confirm: it stops the chat)
   if (S.qa.pend[c.id]) return;
   S.qa.pend[c.id] = { rid: "", kind: "turn", at: Date.now(), msg: "Reply sent to the Mac chat", fail: "Reply not sent" }; // taken at once: a double tap sends one reply
@@ -5244,6 +5303,21 @@ function rfGatedDecFor(sessionId, itemId, machine) {
   }
   return null;
 }
+/** A reply typed to a chat whose decision is gated is never a plain send. Closes the dialog, the chat sheet and the Quick sheet, drops the keyboard, then opens the decision sheet. A typed-answer (text) gate gets the text straight onto its yes screen, so the hash covers exactly those words and nothing goes until the yes tap. Any other gate opens as it is with a one-line note. The draft stays until the answer is sent. Returns true when it took over. */
+function rfReplyViaYes(sessionId, machine, text, fromQuick, dec) {
+  var d = dec || rfGatedDecFor(sessionId, "", machine); if (!d) return false;
+  var t = str(text).trim();
+  if (t) { if (fromQuick) S.qa.drafts[sessionId] = t; else S.drafts[sessionId] = t; }
+  if (S.ask) { S.ask = null; renderDialog(); }
+  if (S.qa && S.qa.open) closeQuick();
+  if (S.focus) closeFocus();
+  try { var ae = document.activeElement; if (ae && ae.blur) ae.blur(); } catch (e) {}
+  rfOpenDec(d.id, null);
+  var typed = !!(t && d.gate && d.kind === "text" && !d.gateBad && rfAnswerFields(d, { answer: t }, d.machine, "0".repeat(64)));
+  if (typed) { S.rf.vals[d.id] = t; S.rf.gateAns = { id: d.id, answer: t }; S.rf.gate = d.id; renderDec(); toast("Check your reply, then say yes. Nothing is sent until you do."); }
+  else toast(d.gate && d.kind === "text" ? "This reply can\u2019t be sent as a typed answer. It is kept as a draft." : "This chat needs a yes screen first, and it has no typed answer. Your reply is kept as a draft.");
+  return true;
+}
 /** The Quick sheet card for an item whose decision is gated: no option buttons, no typed reply; only "Review and say yes", which opens the decision sheet. */
 function quickGatedCard(card, c, d) {
   card.appendChild(h("div", { "class": "qq", text: c.ask || d.ask }));
@@ -5399,6 +5473,7 @@ async function rfDoGated(d) {
     S.rf.gate = ""; S.rf.gateAns = null; rfLocalSet(d, ga ? "Answered: " + (ga.answers !== undefined ? ga.answers.join(", ") : ga.answer).slice(0, 40) : "Claude is getting it ready", { undo: false }); rfCloseSheet(true);
     var rid = await rfSend(f, { id: d.id, onFail: function () { delete S.rf.local[d.id]; }, onDone: function () { toast("Claude has it ready. You do the last step."); } });
     if (!rid) delete S.rf.local[d.id]; else toast(ga ? "Sent your answer." : "Sent. Claude gets it ready; you do the last step.");
+    if (rid && ga && ga.answer !== undefined && d.sessionId) { if (S.drafts[d.sessionId] === ga.answer) S.drafts[d.sessionId] = ""; if (S.qa.drafts[d.sessionId] === ga.answer) S.qa.drafts[d.sessionId] = ""; } // the draft goes only once the answer is on its way
   } catch (e) { toast("Couldn’t build the yes, so nothing was sent."); }
   finally { S.rf.gateBusy = false; render(true); renderDec(); }
 }
