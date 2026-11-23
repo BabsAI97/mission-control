@@ -32,7 +32,8 @@ var S = {
   drafts: Object.create(null), reqErr: "", unknown: Object.create(null), pairUI: null, relayReadyAt: 0, reqSnapAt: 0, focusTimer: 0, lastRefreshAt: 0, focusActiveAt: 0, undo: null,
   ask: null, actOpen: false, savesOpen: false, saveSel: null, saveFocus: null, bannerOff: NaN, toastMsg: "",
   dragging: false, dirty: false, pinching: false, suppressUntil: 0, lastSig: "",
-  tab: "today", filter: "all", query: "", pins: Object.create(null), readAt: Object.create(null), readBase: NaN, queue: [], qTimer: 0, sendWatch: Object.create(null), reqWatch: Object.create(null),
+  rf: { order: "effort", sheet: null, opener: null, local: Object.create(null), undone: Object.create(null), hold: Object.create(null), reqs: Object.create(null), vals: Object.create(null), checks: Object.create(null), askPend: Object.create(null), jobAsks: Object.create(null), overlay: Object.create(null), saveSt: Object.create(null), snz: false, confirm: "", gate: "", gateAns: null, gateSel: Object.create(null), gateBusy: false, deep: "", badge: -1, pageAt: Date.now(), sessMode: "stack", saveFilter: "all", showNames: false, push: { sub: null, busy: false }, stack: { all: false, seen: Object.create(null), busy: Object.create(null), last: null } },
+  tab: "decide", filter: "all", query: "", pins: Object.create(null), readAt: Object.create(null), readBase: NaN, queue: [], qTimer: 0, sendWatch: Object.create(null), reqWatch: Object.create(null),
   schedules: { Mac: undefined, PC: undefined }, saveOpen: null, actExp: null, swiping: false, openRow: null, hint: true, needsMap: Object.create(null), unreadMap: Object.create(null), todayData: null,
   assistInfo: null, assistAbout: "", assistDraft: "", assistLocal: [], assistSentAt: 0, assistAiAtSend: 0, assistLast: null, assistReq: null, cardState: Object.create(null), pairWatch: null,
   sig: Object.create(null), manifest: Object.create(null), docHash: Object.create(null), docAt: Object.create(null), mine: Object.create(null), ownSig: Object.create(null), hbNewest: Object.create(null), docMachine: Object.create(null), peekMin: Object.create(null), sigSeq: Object.create(null), ing: Object.create(null), rawReqs: [], reqVer: Object.create(null), pairDocs: { Mac: null, PC: null },
@@ -106,10 +107,33 @@ var BRIDGE_ERRORS = Object.assign(Object.create(null), {
 });
 /** Plain words for a request's error or result (the bridge's own error texts are mapped; anything else is shown as it is). */
 function friendlyError(action, out) {
-  var t = str(out);
+  var t = str(out), bare = t.replace(/^tool error:\s*/i, "");
+  if (action === "archive") { var ae = ARCHIVE_ERRORS[bare.toLowerCase()]; if (ae) return ae; } // L-round 11: one plain sentence per archive refusal code
+  var plain = rfRefusal(action, t); // refocus: one plain sentence per refusal, never a raw code
+  if (plain) return plain;
   if (BRIDGE_ERRORS[t]) return BRIDGE_ERRORS[t];
+  if (bare !== t && RF_ACTIONS.indexOf(action) >= 0 && BRIDGE_ERRORS[bare]) return BRIDGE_ERRORS[bare];
+  if (RF_ACTIONS.indexOf(action) >= 0 && t) return rfGeneric(bare);
   return action === "archive" && /pinned/i.test(t) ? "Not archived: session is pinned. Unpin it first." : t;
 }
+/** Plain sentences for the bridge's archive refusal codes (archiveWhy, refuse, verifyArchived, the watchdog). Looked up lower-case, with any "tool error:" prefix removed. */
+var ARCHIVE_ERRORS = Object.assign(Object.create(null), {
+  "still working": "That chat is still working \u2014 archive it when it stops.",
+  "pinned session": "That chat is pinned \u2014 unpin it on the Mac first.",
+  "pinned": "That chat is pinned \u2014 unpin it on the Mac first.",
+  "scheduled task": "That chat belongs to a scheduled task, so it can\u2019t be archived here.",
+  "gn session": "That is the /gn chat, so it can\u2019t be archived here.",
+  "assistant session": "That is the Assistant chat, so it can\u2019t be archived.",
+  "child still active": "A chat it started may still need you \u2014 archive that one first.",
+  "parent of the bridge": "That chat started Mission Control\u2019s own chat, so it can\u2019t be archived.",
+  "archive check failed": "The Mac couldn\u2019t check that chat, so it was not archived. Try again.",
+  "host session": "That is the Mac\u2019s own Mission Control chat, so it can\u2019t be archived.",
+  "outside test fence": "That chat is outside the test area, so it was not archived.",
+  "not owned": "That chat is no longer on the Mac\u2019s list.",
+  "not archived": "The Mac tried, but the chat is still there. Try again.",
+  "archive unverified": "The Mac couldn\u2019t confirm it was archived. Pull to refresh and check.",
+  "timed out - may still complete": "The Mac hasn\u2019t answered yet. It may still archive \u2014 pull to refresh."
+});
 /** Why doArchive skipped a session (or "" when it may go ahead). blocked = archiveBlock() text. */
 function skipReason(sx, blocked) { return !sx ? "that session is no longer listed" : (blocked || ""); }
 /** Keep the Archive bubble (centre ax,ay at zoom 1, in field px) at least `m` px inside the field. */
@@ -269,6 +293,7 @@ function buildTree(list, tree) {
   return tree;
 }
 /** One machine's sessions: first CAP_SESSIONS only, titles cut to CAP_TITLE. */
+var RF_STATES = ["running", "waiting", "idle", "done", "stale", "error"];
 function mapSessions(list, machine, online, now, titles, unverified) {
   var out = [];
   capList(list, CAP_SESSIONS).forEach(function (s) {
@@ -277,7 +302,8 @@ function mapSessions(list, machine, online, now, titles, unverified) {
     var title = capText(s.title, CAP_TITLE) || "Untitled session";
     titles[s.id] = title;
     var q = quickFields(s, running); // r3: waitKind / ask / stuckFor / rc, cleaned
-    out.push({ id: s.id, title: title, running: running, pinned: !!s.pinned, waiting: s.waiting === true, last: last, waitKind: q.waitKind, ask: q.ask, stuckFor: q.stuckFor, rc: q.rc, sched: s.sched === true,
+    var ar = s.area && typeof s.area === "object" && QA_GROUP_ID_RE.test(str(s.area.id)) ? s.area : null; // 5a: the sidebar area (the older group stays as the fallback)
+    out.push({ id: s.id, title: title, state: RF_STATES.indexOf(s.state) >= 0 ? s.state : "", areaId: ar ? ar.id : "", areaName: ar ? apStr(ar.name, 40) : "", running: running, pinned: !!s.pinned, waiting: s.waiting === true, last: last, waitKind: q.waitKind, ask: q.ask, stuckFor: q.stuckFor, rc: q.rc, sched: s.sched === true,
       group: capText(s.group) || "unsorted", sub: capText(s.sub) || "unsorted", machine: machine, online: online, unverified: !!unverified,
       status: running ? "running" : ((!isNaN(last) && now - last > STALE_MS) ? "stale" : "idle") });
   });
@@ -312,6 +338,7 @@ var ICONS = {
   minus: '<path d="M5 12h14"/>',
   plus: '<path d="M5 12h14M12 5v14"/>',
   send: '<path d="M12 19V5M5 12l7-7 7 7"/>',
+  decide: '<circle cx="12" cy="12" r="9"/><path d="M8 12.5l2.7 2.7L16 9.5"/>',
   today: '<rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/>',
   sessions: '<circle cx="8" cy="9" r="5"/><circle cx="17" cy="15" r="4"/><circle cx="7" cy="19" r="2"/>',
   activity: '<path d="M3 12h4l3-8 4 16 3-8h4"/>',
@@ -366,7 +393,7 @@ function toast(msg, o) {
   el.addEventListener("touchmove", function (e) { if (y0 !== null && e.touches[0].clientY - y0 > 24) { y0 = null; kill(false, false); } }, { passive: true });
   clear(host); host.appendChild(el);
   TOAST = { el: el, kill: kill, undo: !!opt.undo };
-  timer = setTimeout(function () { kill(false, false); }, opt.undo ? 5000 : opt.action ? 8000 : 3000);
+  timer = setTimeout(function () { kill(false, false); }, opt.ms || (opt.undo ? 5000 : opt.action ? 8000 : 3000));
 }
 function hideToast() { if (TOAST) TOAST.kill(true, false); }
 function newId() { return "r_" + Date.now() + "_" + Math.random().toString(36).slice(2, 8); }
@@ -538,12 +565,14 @@ function saveUrlOk(u) {
 }
 function saveClean(v, max) { return String(v == null ? "" : v).replace(/[\u0000-\u001f\u007f]/g, " ").trim().slice(0, max); }
 /** One item, cut to the contract limits; null when it is unusable. url survives only if it passes the allowlist again. */
+/** The link's host name, only to tell YouTube from TikTok from a blog in the Saves filter. Never used as a link. */
+function saveHost(u) { try { var p = new URL(String(u)); return p.protocol === "https:" ? p.hostname.toLowerCase().slice(0, 80) : ""; } catch (e) { return ""; } }
 function cleanSave(it) {
   if (!it || typeof it !== "object") return null;
   var title = saveClean(it.title, 70), kind = it.kind === "photo" || it.kind === "blocked" ? it.kind : "video";
   if (!title) return null;
   return { id: saveClean(it.id, 40) || title, date: /^\d{4}-\d{2}-\d{2}$/.test(String(it.date)) ? String(it.date) : "", handle: saveClean(it.handle, 40),
-    title: title, why: saveClean(it.why, 160), kind: kind, url: saveUrlOk(it.url) ? it.url : null };
+    title: title, why: saveClean(it.why, 160), kind: kind, url: saveUrlOk(it.url) ? it.url : null, host: saveHost(it.url) };
 }
 function cleanSavesDoc(d) {
   if (!d || typeof d !== "object") return null;
@@ -621,7 +650,7 @@ function listTargets(machines, now, onlineMs) {
 /** The fields of each request the page creates (contract v0.3.5): send/archive are targeted at the computer that lists the session; send carries a 5 min ttl; Refresh = one targeted list per online computer, or one untargeted list when none is online. */
 function sendFields(sid, text, machines, about, target) { var f = { action: "send", sessionId: sid, text: text, target: target || pickTarget(sid, machines), ttlSec: SEND_TTL_SEC }; if (about) f.about = about; return f; }
 /** ttlSec for every action the app creates (contract v0.7.2: 60-300). */
-var REQ_TTL = { send: 300, peek: 60, list: 60, archive: 120, restore: 120, start: 300, "agent-save": 300, "agent-run": 300, "agent-toggle": 300, "agent-delete": 300, "research-now": 300, unpair: 120, "pair-start": 120, pair: 120, answer: 120, "reload-config": 60, "away-set": 120, "perm-answer": 120, "q-answer": 120, "keep-awake": 120, "tidy-refresh": 60, "tidy-apply": 300, "tidy-undo": 120 };
+var REQ_TTL = { send: 300, peek: 60, list: 60, archive: 120, restore: 120, start: 300, "agent-save": 300, "agent-run": 300, "agent-toggle": 300, "agent-delete": 300, "research-now": 300, unpair: 120, "pair-start": 120, pair: 120, answer: 120, "reload-config": 60, "away-set": 120, "perm-answer": 120, "q-answer": 120, "keep-awake": 120, "tidy-refresh": 60, "tidy-apply": 300, "tidy-undo": 120, "decision-answer": 120, "decision-snooze": 120, "decision-dismiss": 120, "decision-undo": 120, "decision-ask": 120, "decision-doit": 120, "job-approve": 120, "job-skip": 120, "job-restore": 120, "push-subscribe": 120, "push-unsubscribe": 120 };
 function archiveFields(sid, machines) { return { action: "archive", sessionId: sid, target: pickTarget(sid, machines) }; }
 function refreshFields(machines, now, onlineMs) {
   var ts = listTargets(machines, now, onlineMs);
@@ -650,6 +679,15 @@ function requestBody(f, id, iso) {
   if (f.action === "q-answer") { body.itemId = f.itemId; body.inputHash = f.inputHash; if (f.answers !== undefined) body.answers = f.answers.slice(); else body.answer = f.answer; if (f.other === true) body.other = true; }
   if (f.action === "tidy-apply") body.items = (f.items || []).map(function (i) { return { sessionId: i.sessionId, dest: Object.assign({}, i.dest) }; });
   if (f.action === "tidy-undo") body.applyId = f.applyId;
+  // refocus: only the fields the contract names (5e), never anything else the caller happened to carry
+  if (f.action === "decision-answer") { body.decisionId = f.decisionId; if (f.stepsDone === true) body.stepsDone = true; else if (f.answers !== undefined) body.answers = f.answers.slice(); else body.answer = f.answer; if (f.actionHash) body.actionHash = f.actionHash; }
+  if (f.action === "decision-snooze") { body.decisionId = f.decisionId; body.until = f.until; }
+  if (f.action === "decision-dismiss" || f.action === "decision-undo") body.decisionId = f.decisionId;
+  if (f.action === "decision-ask") { body.decisionId = f.decisionId; body.question = f.question; }
+  if (f.action === "decision-doit") { body.decisionId = f.decisionId; if (f.actionHash) body.actionHash = f.actionHash; }
+  if (f.action === "job-approve" || f.action === "job-skip" || f.action === "job-restore") { body.jobId = f.jobId; body.taskIds = f.taskIds.slice(); body.taskHashes = f.taskHashes.slice(); }
+  if (f.action === "push-subscribe") { body.endpoint = f.endpoint; body.p256dh = f.p256dh; body.auth = f.auth; }
+
   // r3: a start of kind command / saved carries ONLY the command key or the saved prompt's id: no title, no prompt, no project (the Mac refuses any text for these kinds)
   if (f.action === "start" && f.kind === "command") { body.kind = "command"; body.command = f.command; }
   else if (f.action === "start" && f.kind === "saved") { body.kind = "saved"; body.savedId = f.savedId; }
@@ -672,7 +710,7 @@ function derive() {
     if (m) { t = Date.parse(m.lastSeen); online = !isNaN(t) && (S.now - t) < ONLINE_MS; }
     var verified = !S.sig || S.sig["machines/" + n] === "ok", heldKey = !!(typeof DEV !== "undefined" && DEV.macKeys && DEV.macKeys[n]), mine = m && (verified || heldKey) ? mapSessions(m.sessions, n, online, S.now, S.titles, !verified) : [];
     mstat[n] = { exists: !!m, online: online, lastSeen: t, version: m ? str(m.version) : "", mode: m ? str(m.mode) : "", pairing: m && m.pairing === "paired" ? "paired" : "none", total: m && isFinite(Number(m.total)) ? Number(m.total) : null,
-      pairLocked: !!m && m.pairLocked === true, devicePaired: false, verified: verified, sigState: (S.sig && S.sig["machines/" + n]) || "pending", usage: m && verified ? cleanUsage(m.usage) : null, caps: cleanCaps(m && m.caps), startReason: verified && m && m.startReason === "not enabled" ? "starting is off on the Mac" : "", assistant: cleanAssistant(m && m.assistant), devices: verified ? cleanDevices(m && m.devices) : [], quotaWarn: verified ? cleanQuotaWarn(m && m.quotaWarn) : "", saved: verified ? cleanSaved(m && m.saved) : [], away: verified ? cleanAway(m && m.away) : cleanAway(null), keepAwake: verified ? cleanKeepAwake(m && m.keepAwake) : cleanKeepAwake(null), pending: verified ? cleanPending(m && m.pending) : [], tidy: verified ? cleanTidy(m && m.tidy) : cleanTidy(null), configLoadedAt: verified && m ? str(m.configLoadedAt).slice(0, 40) : "", lastError: m ? str(m.lastError) : "", lastErrorAt: m ? Date.parse(m.lastErrorAt) : NaN, shown: mine.length };
+      pairLocked: !!m && m.pairLocked === true, devicePaired: false, verified: verified, sigState: (S.sig && S.sig["machines/" + n]) || "pending", usage: m && verified ? cleanUsage(m.usage) : null, caps: cleanCaps(m && m.caps), startReason: verified && m && m.startReason === "not enabled" ? "starting is off on the Mac" : "", assistant: cleanAssistant(m && m.assistant), devices: verified ? cleanDevices(m && m.devices) : [], quotaWarn: verified ? cleanQuotaWarn(m && m.quotaWarn) : "", saved: verified ? cleanSaved(m && m.saved) : [], away: verified ? cleanAway(m && m.away) : cleanAway(null), keepAwake: verified ? cleanKeepAwake(m && m.keepAwake) : cleanKeepAwake(null), pending: verified ? cleanPending(m && m.pending) : [], rf: verified ? cleanRefocus(m, n) : cleanRefocus(null, n), tidy: verified ? cleanTidy(m && m.tidy) : cleanTidy(null), configLoadedAt: verified && m ? str(m.configLoadedAt).slice(0, 40) : "", lastError: m ? str(m.lastError) : "", lastErrorAt: m ? Date.parse(m.lastErrorAt) : NaN, shown: mine.length };
     if (!m) return;
     buildTree(m.tree, tree);
     mine.forEach(function (x) { sessions.push(x); });
@@ -2161,6 +2199,410 @@ Object.assign(BRIDGE_ERRORS, { // the Mac's own refusal words (PROTOCOL R4.7.2, 
 });
 Object.assign(QA_SKIP_WORDS, { "leave": "left as is", "no such group": "the group is gone", "bad group name": "not an allowed group name", "groups unavailable": "groups could not be read", "already there": "already in that group", "not moved": "could not be moved", "not archived": "could not be archived", "archive unverified": "could not be checked", "timed out": "no answer in time", "host session": "the Mac\u2019s own chat", "outside test fence": "outside the test fence", "tool error": "the Mac refused it", "not restored": "could not be restored" });
 /* @pure-end */
+/* @pure-start */
+/* ---------- refocus (SPEC-refocus.md sections 4 and 5): Decide, Autopilot, the card stack, push. Every rule here is code; nothing from the Mac is trusted past its shape. ---------- */
+var RF_EFFORT = ["", "1 tap", "1 min", "5 min", "needs you at the Mac", "needs money"];
+var RF_KINDS = ["choice", "text", "steps", "queue", "pay", "permission"], RF_SOURCES = ["chat", "away", "kb", "job"], RF_GATES = ["pay", "purchase", "signup", "message", "delete", "choice"];
+var RF_JOB_ST = ["needs-yes", "running", "approved", "done", "paused"], RF_TASK_ST = ["needs-yes", "approved", "skipped", "done", "running"];
+var RF_ACTIONS = ["decision-answer", "decision-snooze", "decision-dismiss", "decision-undo", "decision-ask", "decision-doit", "job-approve", "job-skip", "job-restore", "push-subscribe", "push-unsubscribe"];
+var RF_HOSTS = ["web.push.apple.com", "fcm.googleapis.com", "updates.push.services.mozilla.com"];
+var RF_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}$/, RF_B64U = /^[A-Za-z0-9_-]+$/;
+var RF_MAX = { decisions: 40, cleared: 40, jobs: 10, tasks: 30, areas: 30, asks: 6, askQ: 300, askA: 600, text: 1000 };
+var RF_AREA_TONES = 6;
+/** ISO text or epoch (ms, or s) to epoch ms; NaN when it is not a real time. */
+function rfTime(v) {
+  if (typeof v === "number") return isFinite(v) && v > 0 ? (v > 1e11 ? v : v * 1000) : NaN;
+  var t = Date.parse(str(v)); return isFinite(t) ? t : NaN;
+}
+/** An https link with no credentials and no odd port, or "". (The Mac only sends KB-note or allowlisted links; this is the second check.) */
+function rfHref(u) {
+  var s = str(u).trim();
+  if (!s || s.length > 300 || /[\u0000- \u007f"<>\\^`{|}]/.test(s)) return "";
+  var m = /^https:\/\/([^\/?#:@]+)(:\d+)?([\/?#][^\s]*)?$/i.exec(s);
+  if (!m || (m[2] && m[2] !== ":443") || !/^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$/i.test(m[1]) || m[1].indexOf(".") < 0 || /^[0-9.]+$/.test(m[1])) return "";
+  return s;
+}
+function rfList(a, n, len) {
+  var out = [];
+  (Array.isArray(a) ? a : []).forEach(function (x) { var t = apStr(x, len); if (t && out.length < n && out.indexOf(t) < 0) out.push(t); });
+  return out;
+}
+function cleanAreas(list) {
+  var out = [];
+  (Array.isArray(list) ? list : []).forEach(function (a) {
+    if (out.length >= RF_MAX.areas || !a || typeof a !== "object" || !QA_GROUP_ID_RE.test(str(a.id)) || out.some(function (x) { return x.id === a.id; })) return;
+    out.push({ id: a.id, name: apStr(a.name, 40) || a.id });
+  });
+  if (!out.some(function (x) { return x.id === "unsorted"; })) out.push({ id: "unsorted", name: "Unsorted" });
+  return out;
+}
+/** The gate of a risky action: item, amount, fee and the recipient or account must all be there, or the gate is refused (null). */
+function cleanGate(g) {
+  if (!g || typeof g !== "object" || RF_GATES.indexOf(g.kind) < 0) return null;
+  var o = { kind: g.kind, item: apStr(g.item, 140), amount: apStr(g.amount, 40), fee: apStr(g.fee, 40), recipient: apStr(g.recipient, 120), account: apStr(g.account, 120), handoffUrl: rfHref(g.handoffUrl) };
+  if (o.kind === "choice") return o.item ? o : null; // an answer to Claude's own question: no recipient or account, the question and the exact picked label are what the yes covers
+  return o.item && (o.recipient || o.account) ? o : null;
+}
+function cleanDecision(x, machine) {
+  if (!x || typeof x !== "object" || !QA_HEX32.test(str(x.id)) || RF_KINDS.indexOf(x.kind) < 0) return null;
+  var effort = Number(x.effort), ask = apStr(x.ask, 140);
+  if (!(effort >= 1 && effort <= 5 && Math.floor(effort) === effort) || !ask) return null;
+  if (x.gate != null && effort < 2) effort = 2; // a gated or broken-gated decision is never a "1 tap" one
+  var area = x.area && typeof x.area === "object" && QA_GROUP_ID_RE.test(str(x.area.id)) ? { id: x.area.id, name: apStr(x.area.name, 40) || x.area.id } : { id: "unsorted", name: "Unsorted" };
+  var gate = x.gate === undefined || x.gate === null ? null : cleanGate(x.gate);
+  return { id: x.id, machine: machine, sessionId: QA_SID_RE.test(str(x.sessionId)) ? x.sessionId : "", source: RF_SOURCES.indexOf(x.source) >= 0 ? x.source : "chat",
+    project: apStr(x.project, 80) || "Chat", area: area, ask: ask, effort: effort, kind: x.kind,
+    options: x.kind === "choice" ? rfList(x.options, 6, 80) : [], placeholder: apStr(x.placeholder, 60), multiline: x.multiline === true, steps: x.kind === "steps" ? rfList(x.steps, 8, 160) : [],
+    what: apStr(x.what, 300), why: apStr(x.why, 300), skip: apStr(x.skip, 300), doit: apStr(x.doit, 300), canDoIt: x.canDoIt === true, gate: gate, gateRaw: gate ? JSON.parse(JSON.stringify(x.gate)) : null, gateBad: x.gate != null && !gate,
+    where: (Array.isArray(x.where) ? x.where : []).slice(0, 6).map(function (w) { return w && typeof w === "object" ? { text: apStr(w.text, 160), href: rfHref(w.href) } : null; }).filter(function (w) { return w && w.text; }),
+    context: rfList(x.context, 5, 200), inputHash: QA_HEX64.test(str(x.inputHash)) ? x.inputHash : "", itemId: QA_HEX32.test(str(x.itemId)) ? x.itemId : "",
+    createdAt: rfTime(x.createdAt), expiresAt: rfTime(x.expiresAt), snoozedUntil: rfTime(x.snoozedUntil) };
+}
+function rfOrder(a, b) {
+  var ta = isFinite(a.createdAt) ? a.createdAt : Infinity, tb = isFinite(b.createdAt) ? b.createdAt : Infinity;
+  return (a.effort - b.effort) || (ta < tb ? -1 : ta > tb ? 1 : 0) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+}
+function cleanDecisions(list, machine) {
+  var out = [], seen = Object.create(null);
+  (Array.isArray(list) ? list : []).slice(0, RF_MAX.decisions).forEach(function (x) { var d = cleanDecision(x, machine); if (d && !seen[d.id]) { seen[d.id] = true; out.push(d); } });
+  return out.sort(rfOrder);
+}
+function cleanCleared(list, machine) {
+  var out = [], seen = Object.create(null);
+  (Array.isArray(list) ? list : []).slice(0, RF_MAX.cleared).forEach(function (x) {
+    if (!x || typeof x !== "object" || !QA_HEX32.test(str(x.id)) || seen[x.id]) return;
+    seen[x.id] = true; out.push({ id: x.id, machine: machine, project: apStr(x.project, 80) || "Chat", outcome: apStr(x.outcome, 140), at: rfTime(x.at), undo: x.undo === true });
+  });
+  return out;
+}
+function cleanJobs(list, machine) {
+  var out = [], seen = Object.create(null);
+  (Array.isArray(list) ? list : []).slice(0, RF_MAX.jobs).forEach(function (j) {
+    if (!j || typeof j !== "object" || !RF_ID_RE.test(str(j.id)) || seen[j.id] || RF_JOB_ST.indexOf(j.status) < 0) return;
+    seen[j.id] = true;
+    var ts = [], tseen = Object.create(null), p = Number(j.progress);
+    (Array.isArray(j.tasks) ? j.tasks : []).slice(0, RF_MAX.tasks).forEach(function (t) {
+      if (!t || typeof t !== "object" || !RF_ID_RE.test(str(t.id)) || tseen[t.id] || RF_TASK_ST.indexOf(t.status) < 0 || !apStr(t.text, 80) || typeof t.text !== "string") return;
+      tseen[t.id] = true; var m = Number(t.minutes);
+      ts.push({ id: t.id, text: apStr(t.text, 80), textRaw: typeof t.text === "string" ? t.text : "", status: t.status, minutes: isFinite(m) && m >= 0 && m <= 999 ? Math.round(m) : 0 });
+    });
+    out.push({ id: j.id, machine: machine, name: apStr(j.name, 60) || "Job", schedule: apStr(j.schedule, 80), status: j.status, progress: isFinite(p) && p >= 0 && p <= 100 ? Math.round(p) : null, summary: apStr(j.summary, 160), tasks: ts });
+  });
+  return out;
+}
+function cleanAsks(o) {
+  var out = Object.create(null);
+  if (!o || typeof o !== "object") return out;
+  Object.keys(o).slice(0, 60).forEach(function (k) {
+    if (!RF_ID_RE.test(k) || !Array.isArray(o[k])) return;
+    var l = o[k].slice(-RF_MAX.asks).map(function (x) { return x && typeof x === "object" ? { q: apStr(x.q, RF_MAX.askQ), a: apStr(x.a, RF_MAX.askA), at: rfTime(x.at) } : null; }).filter(function (x) { return x && x.q; });
+    if (l.length) out[k] = l;
+  });
+  return out;
+}
+/** Push's public key (65 bytes, base64url, so 87 characters) and who the Mac will alert. */
+function cleanPush(p) {
+  var out = { vapidKey: "", on: Object.create(null) };
+  if (!p || typeof p !== "object") return out;
+  var k = str(p.vapidKey);
+  if (/^[A-Za-z0-9_-]{86,88}$/.test(k)) out.vapidKey = k;
+  if (p.on && typeof p.on === "object") Object.keys(p.on).slice(0, 10).forEach(function (id) { if (/^[0-9a-f]{32}$/.test(id) && p.on[id] && typeof p.on[id] === "object") out.on[id] = { lastAlertAt: rfTime(p.on[id].lastAlertAt) }; });
+  return out;
+}
+/** One heartbeat's refocus fields, cleaned. A heartbeat without them (an older bridge) gives empty lists and known:false. */
+function cleanRefocus(m, machine) {
+  var k = !!m && typeof m === "object" && (Array.isArray(m.decisions) || Array.isArray(m.jobs) || Array.isArray(m.areas));
+  if (!k) return { known: false, areas: cleanAreas(null), decisions: [], cleared: [], jobs: [], asks: Object.create(null), push: cleanPush(null) };
+  return { known: true, areas: cleanAreas(m.areas), decisions: cleanDecisions(m.decisions, machine), cleared: cleanCleared(m.cleared, machine), jobs: cleanJobs(m.jobs, machine), asks: cleanAsks(m.asks), push: cleanPush(m.push) };
+}
+/** Several computers: lists joined (decisions re-sorted), areas by id, the first computer's push key. */
+function rfMerge(parts) {
+  var out = { known: false, areas: [], decisions: [], cleared: [], jobs: [], asks: Object.create(null), push: { vapidKey: "", on: Object.create(null), machine: "" } }, seenA = Object.create(null);
+  parts.forEach(function (p) {
+    if (!p || !p.rf || !p.rf.known) return;
+    var r = p.rf; out.known = true;
+    r.areas.forEach(function (a) { if (!seenA[a.id]) { seenA[a.id] = true; out.areas.push(a); } });
+    out.decisions = out.decisions.concat(r.decisions); out.cleared = out.cleared.concat(r.cleared); out.jobs = out.jobs.concat(r.jobs);
+    Object.keys(r.asks).forEach(function (k) { out.asks[k] = r.asks[k]; });
+    if (r.push.vapidKey && !out.push.vapidKey) { out.push.vapidKey = r.push.vapidKey; out.push.machine = p.name; }
+    Object.keys(r.push.on).forEach(function (id) { out.push.on[id] = r.push.on[id]; });
+  });
+  out.decisions.sort(rfOrder);
+  return out;
+}
+/** What shows in Decide: not answered here yet (local), not snoozed, not expired. */
+function rfPending(decisions, local, now) {
+  return (decisions || []).filter(function (d) { return !(local && local[d.id]) && !(isFinite(d.snoozedUntil) && d.snoozedUntil > now) && !(isFinite(d.expiresAt) && d.expiresAt <= now); });
+}
+/** Summary card: quick = effort 1-2 (1 tap counts 0.3 min, 1 min counts 1). */
+function rfSummary(pending, clearedN) {
+  var quick = pending.filter(function (d) { return d.effort <= 2; }), mins = Math.max(1, Math.round(quick.reduce(function (a, d) { return a + (d.effort === 1 ? 0.3 : 1); }, 0))), total = pending.length + clearedN;
+  return { quick: quick.length, mins: mins, text: quick.length ? quick.length + " quick one" + (quick.length === 1 ? "" : "s") + ", about " + mins + " min" : "Quick ones cleared", clearedText: clearedN + " of " + total + " cleared", pct: total ? Math.round(clearedN / total * 100) : 0 };
+}
+function rfByEffort(pending) {
+  var out = [];
+  for (var e = 1; e <= 5; e++) { var g = pending.filter(function (d) { return d.effort === e; }); if (g.length) out.push({ key: "e" + e, effort: e, label: RF_EFFORT[e], items: g }); }
+  return out;
+}
+/** One group per sidebar area that has a decision, in the sidebar's order (areas the sidebar does not list come last). */
+function rfByArea(pending, areas) {
+  var out = [], idx = Object.create(null);
+  (areas || []).forEach(function (a) { idx[a.id] = { key: "a" + a.id, areaId: a.id, label: a.name, items: [] }; out.push(idx[a.id]); });
+  pending.forEach(function (d) { var g = idx[d.area.id]; if (!g) { g = idx[d.area.id] = { key: "a" + d.area.id, areaId: d.area.id, label: d.area.name, items: [] }; out.push(g); } g.items.push(d); });
+  return out.filter(function (g) { return g.items.length; });
+}
+/** Area colour slot 0-5: the area's place in the sidebar order (so neighbours differ), else a hash of its id ("unsorted" is the grey slot, -1). */
+function rfAreaTone(id, areas) {
+  if (id === "unsorted") return -1;
+  var list = (areas || []).filter(function (a) { return a.id !== "unsorted"; }), i = -1;
+  list.forEach(function (a, k) { if (a.id === id) i = k; });
+  if (i >= 0) return i % RF_AREA_TONES;
+  var h = 5381, s = str(id); for (var j = 0; j < s.length; j++) h = ((h << 5) + h + s.charCodeAt(j)) >>> 0; return h % RF_AREA_TONES;
+}
+/** Tab badges: Decide = pending effort-1 decisions (only an Away permission is one now: every chat answer and Away question goes through the yes screen), Autopilot = jobs that need a yes (0 = no badge). */
+function rfBadges(pending, jobs) {
+  return { decide: pending.filter(function (d) { return d.effort === 1; }).length, autopilot: (jobs || []).filter(function (j) { return j.status === "needs-yes"; }).length };
+}
+function rfMins(m) { return m >= 60 ? Math.floor(m / 60) + " h" + (m % 60 ? " " + (m % 60) + " min" : "") : m + " min"; }
+/** Cleared today: this phone's own answers first (until the Mac lists them), then the Mac's list. */
+function rfClearedList(mac, local, undone, now) {
+  var out = [], seen = Object.create(null);
+  Object.keys(local || {}).forEach(function (id) { var l = local[id]; if (l && !(undone && undone[id])) { seen[id] = true; out.push({ id: id, machine: l.machine, project: l.project, outcome: l.outcome, at: l.at, undo: l.undo !== false, mine: true }); } });
+  (mac || []).forEach(function (c) { if (!seen[c.id] && !(undone && undone[c.id])) { seen[c.id] = true; out.push(Object.assign({}, c, { mine: false })); } });
+  return out.sort(function (a, b) { return (isFinite(b.at) ? b.at : 0) - (isFinite(a.at) ? a.at : 0); }).slice(0, RF_MAX.cleared);
+}
+/** The Mac's own permission or question item for this decision (matched by id and machine, and by hash when the decision carries one). null = it is gone from the Mac. */
+function rfPermItem(d, pend) {
+  var id = d.itemId || d.id;
+  for (var i = 0; i < (pend || []).length; i++) { var p = pend[i]; if (p.itemId === id && p.machine === d.machine && (!d.inputHash || p.inputHash === d.inputHash)) return p; }
+  return null;
+}
+/** What "Do it for me" does for this decision: go (not risky), gated (needs the exact yes screen), no (Claude can't, or a risky action without a valid gate). */
+function rfDoit(d) {
+  var no = { mode: "no", sub: "Claude cannot" };
+  if (!d || !d.canDoIt || d.gateBad || d.kind === "permission" || (d.kind === "pay" && !d.gate)) return no;
+  if (d.gate && d.gate.kind === "choice") return { mode: "no", sub: "Answer it instead: your yes needs the exact answer" }; // a plain question is answered only on its yes screen, with the answer
+  if (d.gate) return { mode: "gated", sub: "Needs your yes · Claude gets it ready, you do the last step" };
+  return { mode: "go", sub: "Claude handles it" };
+}
+/** The text a yes is bound to: canonical({ v: 1, id: <decision id>, gate: <the heartbeat's gate object exactly as signed, handoffUrl included> }) for "Do it for me" (decision-doit, no answer key); for a gated ANSWER (decision-answer) it also carries answer: the exact string, or the answers array (5e). The Mac hashes the same text. */
+function rfGateInput(id, rawGate, answer) {
+  var o = { v: 1, id: id, gate: rawGate };
+  if (answer !== undefined) o.answer = answer;
+  return canonicalJson(o);
+}
+async function rfActionHash(id, rawGate, digestFn, answer) {
+  var buf = await digestFn(new TextEncoder().encode(rfGateInput(id, rawGate, answer)));
+  return Array.prototype.map.call(new Uint8Array(buf), function (x) { return (x < 16 ? "0" : "") + x.toString(16); }).join("");
+}
+/** The yes screen lines, from the decision's own gate (never from model text). */
+function rfGateLines(g) {
+  if (g.kind === "choice") return [["Question", g.item]];
+  var to = g.recipient ? ["Recipient", g.recipient] : ["Account", g.account];
+  return [["Item", g.item], ["Amount", g.amount || "none"], ["Fee", g.fee || "free"], to];
+}
+var RF_GATE_WORD = { pay: "a payment", purchase: "a purchase", signup: "a sign-up", message: "a message to someone", "delete": "a delete", choice: "an answer to Claude's question" };
+function rfSnoozeUntil(kind, now) {
+  var d = new Date(now), at;
+  if (kind === "hour") return now + 3600000;
+  if (kind === "tonight") { at = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 21, 0, 0).getTime(); return at - now >= 1800000 ? at : now + 3 * 3600000; }
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1, 8, 0, 0).getTime();
+}
+function rfSnoozeText(kind, until) { var d = new Date(until); return kind === "hour" ? "Snoozed for 1 hour" : kind === "tonight" ? "Snoozed until tonight" : "Snoozed until tomorrow"; }
+/* ----- signed request fields (createRequest refuses what rfInvalid says no to) ----- */
+function rfBaseF(action, target) { return { action: action, target: target, ttlSec: 120 }; }
+var RF_CTRL = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/;
+/** decision-answer: the answer must be one of the decision's own options (choice), non-blank text (text), every step ticked (steps), or the fixed word for queue / pay. null = send nothing. */
+function rfAnswerFields(d, ans, target, hash) {
+  if (!d || !target || !QA_HEX32.test(str(d.id)) || !ans) return null;
+  var f = rfBaseF("decision-answer", target); f.decisionId = d.id;
+  var gated = (d.kind === "choice" || d.kind === "text") && (d.gate || d.gateBad);
+  // a gated decision is answered ONLY with the hash of its own gate AND the exact answer (the yes screen builds it); never by a plain tap or text
+  if (gated && (d.gateBad || !QA_HEX64.test(str(hash)))) return null;
+  if (d.kind === "choice" && gated && ans.answers !== undefined) {
+    var pk = ans.answers; if (!Array.isArray(pk) || pk.length < 1 || pk.length > QA_MULTI_MAX || pk.some(function (x, i) { return d.options.indexOf(x) < 0 || pk.indexOf(x) !== i; })) return null;
+    f.answers = pk.slice();
+  } else if (d.kind === "choice") { if (d.options.indexOf(ans.answer) < 0) return null; f.answer = ans.answer; }
+  else if (d.kind === "text") { var t = str(ans.answer); if (!t.trim() || t.length > RF_MAX.text || RF_CTRL.test(t)) return null; f.answer = t; }
+  else if (d.kind === "steps") { if (!d.steps.length || !ans.ticked || ans.ticked.length !== d.steps.length || !d.steps.every(function (_, i) { return ans.ticked[i] === true; })) return null; f.stepsDone = true; }
+  else if (d.kind === "queue") f.answer = "queue";
+  else if (d.kind === "pay") { if (ans.confirmed !== true) return null; f.answer = "paid"; }
+  else return null;
+  if (gated) f.actionHash = hash;
+  return f;
+}
+function rfSnoozeFields(d, until, target) { return d && target && QA_HEX32.test(str(d.id)) && isFinite(until) ? Object.assign(rfBaseF("decision-snooze", target), { decisionId: d.id, until: new Date(until).toISOString() }) : null; }
+function rfIdFields(action, d, target) { return d && target && QA_HEX32.test(str(d.id)) ? Object.assign(rfBaseF(action, target), { decisionId: d.id }) : null; }
+function rfAskFields(d, q, target) { var t = str(q).trim(); return d && target && QA_HEX32.test(str(d.id)) && t && t.length <= RF_MAX.askQ && !RF_CTRL.test(t) ? Object.assign(rfBaseF("decision-ask", target), { decisionId: d.id, question: t }) : null; }
+/** decision-doit: a risky action only with the hash of its own gate; anything not "go" or "gated" sends nothing. */
+function rfDoitFields(d, hash, target) {
+  var m = rfDoit(d); if (!target || !QA_HEX32.test(str(d && d.id)) || (m.mode !== "go" && m.mode !== "gated")) return null;
+  var f = Object.assign(rfBaseF("decision-doit", target), { decisionId: d.id });
+  if (m.mode === "gated") { if (!QA_HEX64.test(str(hash))) return null; f.actionHash = hash; }
+  return f;
+}
+/** Lower-case hex SHA-256 of each task's exact raw text (UTF-8, not trimmed), in the order of ids. digestFn(bytes) -> Promise<ArrayBuffer>. null when an id is not in the job. */
+async function rfTaskHashes(job, ids, digestFn) {
+  var out = [];
+  for (var i = 0; i < ids.length; i++) {
+    var t = job && Array.isArray(job.tasks) ? job.tasks.filter(function (x) { return x.id === ids[i]; })[0] : null;
+    if (!t || typeof t.textRaw !== "string" || !t.textRaw) return null;
+    var buf = await digestFn(new TextEncoder().encode(t.textRaw));
+    out.push(Array.prototype.map.call(new Uint8Array(buf), function (x) { return (x < 16 ? "0" : "") + x.toString(16); }).join(""));
+  }
+  return out;
+}
+var RF_JOB_ACT = { approve: "job-approve", skip: "job-skip", restore: "job-restore" };
+function rfJobFields(kind, job, taskIds, target, hashes) {
+  var ids = Array.isArray(taskIds) ? taskIds : [], action = RF_JOB_ACT[kind];
+  if (!action || !job || !target || !RF_ID_RE.test(str(job.id)) || !ids.length || ids.length > RF_MAX.tasks || !ids.every(function (i) { return RF_ID_RE.test(str(i)) && job.tasks.some(function (t) { return t.id === i; }); })) return null;
+  if (!Array.isArray(hashes) || hashes.length !== ids.length || !hashes.every(function (x) { return QA_HEX64.test(str(x)); })) return null;
+  return Object.assign(rfBaseF(action, target), { jobId: job.id, taskIds: ids.slice(), taskHashes: hashes.slice() });
+}
+/** Push endpoints: https, an allowlisted host, no port, no credentials, no IP literal. */
+function rfPushEndpointOk(u) {
+  var m = /^https:\/\/([a-z0-9.-]+)(\/[A-Za-z0-9_\-\/.~%=+]*)$/.exec(str(u));
+  return !!m && str(u).length <= 600 && RF_HOSTS.indexOf(m[1]) >= 0;
+}
+function rfPushSubFields(sub, target) {
+  if (!target || !sub || !rfPushEndpointOk(sub.endpoint) || !/^[A-Za-z0-9_-]{80,90}$/.test(str(sub.p256dh)) || !/^[A-Za-z0-9_-]{20,24}$/.test(str(sub.auth))) return null;
+  return Object.assign(rfBaseF("push-subscribe", target), { endpoint: sub.endpoint, p256dh: sub.p256dh, auth: sub.auth });
+}
+function rfPushUnsubFields(target) { return target ? rfBaseF("push-unsubscribe", target) : null; }
+/** "" when a refocus request is well formed, else why not (createRequest sends nothing in that case). */
+function rfInvalid(f) {
+  if (!f || !f.target) return "no computer";
+  var idOk = QA_HEX32.test(str(f.decisionId));
+  switch (f.action) {
+    case "decision-answer": return idOk && (f.actionHash === undefined || (QA_HEX64.test(str(f.actionHash)) && f.stepsDone === undefined)) && ((typeof f.answer === "string" && f.answer.length >= 1 && f.answer.length <= RF_MAX.text && f.stepsDone === undefined && f.answers === undefined) || (Array.isArray(f.answers) && f.answers.length >= 1 && f.answers.length <= QA_MULTI_MAX && f.answers.every(function (x) { return typeof x === "string" && x.length >= 1 && x.length <= RF_MAX.text; }) && f.answer === undefined && f.stepsDone === undefined) || (f.stepsDone === true && f.answer === undefined && f.answers === undefined)) ? "" : "bad answer";
+    case "decision-snooze": { var u = Date.parse(str(f.until)); return idOk && isFinite(u) && u > Date.now() - 60000 && u < Date.now() + 14 * 86400000 ? "" : "bad snooze"; }
+    case "decision-dismiss": case "decision-undo": return idOk ? "" : "bad decision";
+    case "decision-ask": return idOk && typeof f.question === "string" && f.question.trim() && f.question.length <= RF_MAX.askQ ? "" : "bad question";
+    case "decision-doit": return idOk && (f.actionHash === undefined || QA_HEX64.test(str(f.actionHash))) ? "" : "bad action";
+    case "job-approve": case "job-skip": case "job-restore": return RF_ID_RE.test(str(f.jobId)) && Array.isArray(f.taskIds) && f.taskIds.length >= 1 && f.taskIds.length <= RF_MAX.tasks && f.taskIds.every(function (i) { return RF_ID_RE.test(str(i)); }) && Array.isArray(f.taskHashes) && f.taskHashes.length === f.taskIds.length && f.taskHashes.every(function (x) { return QA_HEX64.test(str(x)); }) ? "" : "bad job";
+    case "push-subscribe": return rfPushEndpointOk(f.endpoint) && /^[A-Za-z0-9_-]{80,90}$/.test(str(f.p256dh)) && /^[A-Za-z0-9_-]{20,24}$/.test(str(f.auth)) ? "" : "bad subscription";
+    case "push-unsubscribe": return "";
+  }
+  return "unknown action";
+}
+/* ----- job overlay: what the phone has just asked for shows at once and yields to the Mac's own list ----- */
+function rfJobView(jobs, overlay, now) {
+  return (jobs || []).map(function (j) {
+    var tasks = j.tasks.map(function (t) { var o = overlay && overlay[j.id + ":" + t.id]; return o && now - o.at < 60000 && t.status !== "done" && t.status !== "running" ? Object.assign({}, t, { status: o.status }) : t; });
+    var yes = tasks.filter(function (t) { return t.status === "needs-yes"; }).length, st = j.status;
+    if ((st === "needs-yes" || st === "approved") && tasks.length) st = yes ? "needs-yes" : "approved";
+    return Object.assign({}, j, { tasks: tasks, status: st });
+  });
+}
+function rfJobStats(j) {
+  var live = j.tasks.filter(function (t) { return t.status !== "skipped"; }), mins = live.reduce(function (a, t) { return a + t.minutes; }, 0), yes = j.tasks.filter(function (t) { return t.status === "needs-yes"; }).length;
+  return { n: j.tasks.length, mins: mins, yes: yes, text: plural(j.tasks.length, "task", "tasks") + " · about " + rfMins(mins) + " · " + (yes ? yes + " need a yes" : "nothing needs a yes") };
+}
+var RF_JOB_GROUPS = [["needs-yes", "Needs your yes"], ["running", "Running"], ["approved", "Approved"], ["done", "Done"], ["paused", "Paused"]];
+var RF_JOB_ACTION = { "needs-yes": "Review", approved: "Details", running: "Stop", paused: "Resume", done: "" };
+var RF_TASK_WORD = { "needs-yes": "Needs a yes", approved: "Approved", skipped: "Skipped", done: "Done", running: "Running" };
+/* ----- card stack ----- */
+function rfAreaOf(s) { return s.areaId || (s.group && s.group !== "unsorted" ? s.group : "unsorted"); }
+/** Chats for the stack: Unsorted only, or every chat; newest activity first; not archived or finished running ones are all kept (the Mac re-checks at apply time). */
+function rfStackList(sessions, all) {
+  return (sessions || []).filter(function (s) { return !s.unverified && (all || rfAreaOf(s) === "unsorted"); }).sort(function (a, b) { return (isFinite(b.last) ? b.last : 0) - (isFinite(a.last) ? a.last : 0) || (a.id < b.id ? -1 : 1); });
+}
+/** The Tidy rule's suggestion for one chat when it names a real area other than where the chat is. */
+function rfSuggest(s, tidy, areas) {
+  var it = ((tidy && tidy.items) || []).filter(function (x) { return x.sessionId === s.id; })[0];
+  if (!it || !it.dest || it.dest.kind !== "group" || it.dest.groupId === rfAreaOf(s)) return null;
+  var a = (areas || []).filter(function (x) { return x.id === it.dest.groupId; })[0];
+  return a ? { areaId: a.id, name: a.name, reason: it.reason.replace(/[.\s]+$/, "") } : null;
+}
+function rfMoveFields(s, areaId, areas, target) {
+  if (!s || !target || !QA_SID_RE.test(str(s.id)) || !(areas || []).some(function (a) { return a.id === areaId; }) || areaId === rfAreaOf(s)) return null;
+  return tidyApplyFields([{ sessionId: s.id, dest: { kind: "group", groupId: areaId } }], target);
+}
+/** A card's line of text: "i of n unsorted" (or "(all chats)"). */
+function rfStackCount(i, n, all) { return i + " of " + n + (all ? " (all chats)" : " unsorted"); }
+/* ----- saves restyle (phase 1: same data, same actions) ----- */
+var RF_SAVE_TYPES = [["all", "All"], ["yt", "YouTube"], ["tt", "TikTok"], ["bl", "Blog"], ["gh", "GitHub"], ["x", "X"]];
+function rfSaveType(it) {
+  var h = str(it && it.host).replace(/^www\./, "");
+  if (!h) { try { h = new URL(str(it && it.url)).hostname.toLowerCase().replace(/^www\./, ""); } catch (e) { return "bl"; } }
+  if (/(^|\.)(youtube\.com|youtu\.be)$/.test(h)) return "yt";
+  if (/(^|\.)tiktok\.com$/.test(h)) return "tt";
+  if (/(^|\.)github\.com$/.test(h)) return "gh";
+  if (/(^|\.)(x\.com|twitter\.com|t\.co)$/.test(h)) return "x";
+  return "bl";
+}
+/* ----- push (page side) ----- */
+/** Where this device stands: ios-tab (needs Home Screen), unsupported, blocked, off, on. */
+function rfPushState(o) {
+  if (o.ios && !o.standalone) return "ios-tab";
+  if (!o.supported) return "unsupported";
+  if (o.permission === "denied") return "blocked";
+  return o.subscribed ? "on" : "off";
+}
+/** Re-send the signed push-subscribe once per app open when this device has a browser subscription but the Mac does not list it (the Mac drops a 404/410 subscription). */
+function rfResubNeeded(o) { return !!o.subscribed && !!o.known && !!o.vapidKey && !o.listed && !o.busy && !o.done && o.ageMs > 15000; }
+function rfPushText(state, lastAt, now) {
+  if (state === "ios-tab") return "Notifications: Add to Home Screen first";
+  if (state === "unsupported") return "Notifications: not supported here";
+  if (state === "blocked") return "Notifications: blocked in Settings";
+  if (state === "on") return "Notifications: on · last alert " + (isFinite(lastAt) ? ago(lastAt) : "none yet");
+  return "Notifications: off";
+}
+/** #d=<decision id> and nothing else (a fragment, never a query string). */
+function rfParseHash(hash) { var m = /^#d=([0-9a-f]{32})$/.exec(str(hash)); return m ? m[1] : ""; }
+function rfBadgeCount(n) { n = Math.floor(Number(n)); return isFinite(n) && n > 0 ? Math.min(n, 99) : 0; }
+/** The alert's words as the service worker shows them: payload title/body, but a generic title unless the "show project names" setting is on. */
+function rfAlertText(p, showNames) {
+  var body = apStr(p && p.body, 100), title = apStr(p && p.title, 80);
+  return { title: showNames && title ? title : "A decision needs you", body: body || "Open Mission Control" };
+}
+/* ----- plain refusal sentences (fix 3) ----- */
+var RF_ERRORS = {
+  "no such decision": "That decision is gone. It may already be answered.", "decision gone": "That decision is gone. It may already be answered.", "already answered": "That was already answered.",
+  "decision expired": "That decision has expired.", "not an option": "That isn’t one of the options.", "bad answer": "The Mac refused that answer.",
+  "cannot do it": "Claude can’t do that one for you.", "needs your yes": "That one needs your yes first.", "yes expired": "Your yes ran out after 15 minutes. Ask again.",
+  "yes already used": "That yes was already used.", "details changed": "The details changed, so the yes no longer counts.", "bad action hash": "The details changed, so the yes no longer counts.",
+  "not allowed": "The Mac won’t do that one.", "no such job": "That job is gone.", "task-changed": "That task changed on the Mac. Check it again.", "no such task": "That task is gone.", "task running": "That task is already running.",
+  "bad endpoint": "That notification address isn’t allowed.", "push unavailable": "Notifications aren’t set up on the Mac yet.", "too many subscriptions": "This device already has notifications on.",
+  "asks unavailable": "The Mac can’t answer questions right now.", "slow down": "Too many requests. Wait a minute, then try again.",
+  /* the Mac's own refusal codes (REFUSALS in the bridge's decisions.ts): what happened + what to do */
+  "unknown-decision": "That decision is gone. Pull to refresh.",
+  "bad-request": "The Mac didn’t understand that request. Reload the app and try again.",
+  "cannot-do-it": "Claude can’t do this one for you. It needs you, so do it yourself.",
+  "gate-needs-yes": "This needs your yes for this exact action first. Open it and say yes.",
+  "gate-mismatch": "The details changed since you said yes. Open it, check, and say yes again.",
+  "gate-used": "That yes was already used. Open it and say yes again if you still want it.",
+  "gate-expired": "That yes expired after 15 minutes. Open it and say yes again.",
+  "ledger-unavailable": "The Mac couldn’t record that safely, so nothing was done. Try again soon.",
+  "approve-at-mac": "This one can only be approved at the Mac. Go to the Mac to do it.",
+  "no-longer-waiting": "That chat is no longer waiting for you. Pull to refresh.",
+  "not-allowed": "The Mac doesn’t allow that here. Nothing was changed.",
+  "not-an-option": "That isn’t one of the choices. Open it and pick one from the list.",
+  "ask-unavailable": "Asking questions isn’t available right now. Try again later.",
+  "ask-failed": "Claude couldn’t answer that just now. Try again.",
+  "slow-down": "Too many in a short time. Wait a minute, then try again.",
+  "nothing-to-undo": "There is nothing to undo. It may already be undone.",
+  "bad-subscription": "This phone couldn’t be set up for alerts. Turn alerts off and on again.",
+  "bad-endpoint": "This phone’s alert address isn’t allowed, so alerts stay off. Try again later.",
+  "push-unavailable": "Alerts aren’t available on this Mac. Nothing was changed.",
+  "no-run": "There is no overnight run to change. Pull to refresh.",
+  "not-a-task": "One of those tasks isn’t in the run any more. Pull to refresh.",
+  "task-started": "That task has already started, so it can’t be changed. Pull to refresh.",
+  "job-not-confirmed": "The Mac couldn’t confirm that change. The list now shows what it has.",
+  "start-needs-runner": "Starting chats from the phone comes with the runner (phase 2)."
+};
+var RF_START_OFF = /^(not enabled|start (is )?(off|disabled|unavailable)|starting is off( on the mac)?|start fuse|runner needed)$/i;
+/** The generic sentence for a code with no entry: names the code (whole, never cut) so it can be reported. */
+function rfGeneric(code) { var c = str(code).replace(/^tool error:\s*/i, "").replace(/[^A-Za-z0-9 _.-]/g, "").trim().slice(0, 40); return "The Mac couldn\u2019t do that" + (c ? " (code: " + c + ")" : "") + ". The reason is in its debug log."; }
+/** The plain sentence for a known refusal (a refocus action's own code, or a start the Mac has switched off), else "". */
+function rfRefusal(action, out) {
+  var t = str(out).trim(), bare = t.replace(/^tool error:\s*/i, "");
+  if (RF_ACTIONS.indexOf(action) >= 0) return RF_ERRORS[bare] || RF_ERRORS[t] || "";
+  if ((action === "send" || action === "answer" || action === "quick-reply") && bare === "gate-needs-yes") return RF_ERRORS[bare]; // L3: a refused plain send never shows the raw code
+  if (action === "start" && RF_START_OFF.test(bare)) return "Starting chats from the phone comes with the runner (phase 2).";
+  return "";
+}
+/* @pure-end */
 function stats(list) {
   var run = 0, stale = 0, off = 0;
   list.forEach(function (s) { if (s.status === "running") run++; if (s.status === "stale") stale++; if (!s.online) off++; });
@@ -2217,6 +2659,7 @@ async function createRequest(f, opts) {
   if (f.action === "start" && !fixedStart && (!str(f.title).trim() || !str(f.prompt).trim() || !f.target)) { toast("That start request is incomplete, so nothing was sent."); return false; }
   if (f.action === "answer" && (!str(f.text).trim() || str(f.text).length > 4000)) { toast("That answer is empty or too long, so nothing was sent."); return false; }
   if (f.action === "reload-config" && !f.target) { toast("No computer to reload, so nothing was sent."); return false; }
+  if (RF_ACTIONS.indexOf(f.action) >= 0 && rfInvalid(f)) { toast("That request looks wrong, so nothing was sent."); return false; }
   if (R4_ACTIONS.indexOf(f.action) >= 0 && r4Invalid(f)) { toast("That request looks wrong, so nothing was sent."); return false; }
   opts = Object.assign({}, opts, { sent: {} });
   var id = opts.id || newId(); // a retry keeps its id: the bridge's ledger stops one id from running twice
@@ -2260,6 +2703,8 @@ function guarded(key, fn) {
 async function doSend(s, text, queued, about, quiet) {
   var t = str(text).trim();
   if (!t) return;
+  var gdS = typeof rfGatedDecFor === "function" ? rfGatedDecFor(s.id, "", s.machine) : null;
+  if (gdS) { toast("This chat is waiting on a yes screen first. Open it from Decide."); rfOpenDec(gdS.id, null); return; }
   var r = await guarded("send:" + s.id, function () { return createRequest(sendFields(s.id, t, S.machines, about, about !== undefined && S.assistInfo && S.assistInfo.id === s.id ? S.assistInfo.machine : "")); });
   if (r === undefined) return;
   if (r) {
@@ -2319,20 +2764,20 @@ function render(force) {
   if (S.dragging || S.swiping) { S.dirty = true; return; }
   S.now = Date.now();
   var model = derive();
-  S.byId = model.byId; S.model = model;
+  S.byId = model.byId; S.model = model; rfCompute(model);
   S.needsMap = needsMapFor(model); S.unreadMap = unreadMapFor(model);
   if (model.mstat.Mac.online) S.bannerOff = NaN; // D6: a later outage gets a fresh banner (state reset only; never calls render)
   var wide = isWide();
   document.body.classList.toggle("wide", wide);
   document.body.classList.toggle("dock", wide && !!S.focus);
   renderHeader(model); renderTabbar(model);
-  var tabSig = S.tab === "today" ? todayKey(model) : S.tab === "saves" ? savesKey() : S.tab === "activity" ? activityKey(model) : S.tab === "assistant" ? assistantKey(model) : S.tab === "autopilot" ? autopilotKey(model) : "";
+  var tabSig = S.tab === "today" ? todayKey(model) : S.tab === "saves" ? savesKey() : S.tab === "activity" ? activityKey(model) : S.tab === "assistant" ? assistantKey(model) : S.tab === "overnight" ? autopilotKey(model) : S.tab === "decide" || S.tab === "autopilot" || S.tab === "sessions" ? rfKey(model) : "";
   var sig = JSON.stringify([model.sig, S.dbState, S.dbError, S.tab, S.view, S.group, S.sub, S.sel, S.list, S.filter, S.query, S.more, S.busy, Object.keys(S.unknown).map(function (k) { return k + S.unknown[k].asked; }).join(), homeScreenNeeded(), S.reqLoaded, archivedList().length, window.innerWidth < 600, wide, wide && !!S.focus, waitIds(), Object.keys(S.unreadMap).sort().join(","), Object.keys(S.pins).sort().join(","), S.hint, DEV.state, JSON.stringify(DEV.paired), needsPairing(model), Object.keys(S.sig).map(function (k) { return k + docVerdict(k); }).join(), tabSig, quickSig()]);
   if (force || sig !== S.lastSig) {
     S.lastSig = sig;
     var ae = document.activeElement, key = ae && ae.getAttribute && ae.getAttribute("data-k");
     var ss = key && ae.selectionStart, se = key && ae.selectionEnd;
-    if (S.tab === "sessions") renderNav(model); else renderTabHero(model);
+    if (S.tab === "sessions" && S.rf.sessMode === "browse") renderNav(model); else renderTabHero(model);
     renderMain(model);
     if (key) {
       var again = document.querySelector('[data-k="' + (window.CSS && CSS.escape ? CSS.escape(key) : String(key).replace(/["\\]/g, "")) + '"]');
@@ -2345,6 +2790,8 @@ function render(force) {
   renderMenu();
   renderFocus();
   renderQuick();
+  renderDec();
+  rfBadgeSync();
   renderQueue();
 }
 /** Ids whose newest message asks you something (heartbeat `waiting`, or a fresh peek): they show as "Needs you". */
@@ -2454,27 +2901,27 @@ function renderOffBanner(model) {
 function renderHeader(model) {
   renderOffBanner(model);
   renderUsageRow(model);
-  $("usageRow").style.display = S.tab === "today" ? "none" : "";
+  $("usageRow").style.display = S.tab === "today" || S.tab === "decide" ? "none" : "";
   renderMacChip(model);
 }
 /* ---------- bottom tabs (left sidebar from 900 px) ---------- */
-var TABS = [["today", "Today", "today"], ["sessions", "Sessions", "sessions"], ["assistant", "Assistant", "assistant"], ["autopilot", "Autopilot", "autopilot"], ["saves", "Saves", "save"]];
+var TABS = [["decide", "Decide", "decide"], ["autopilot", "Autopilot", "autopilot"], ["saves", "Saves", "save"], ["sessions", "Sessions", "sessions"]];
 function renderTabbar(model) {
-  var sp = savesPick(), saved = sp.state === "ok" ? savesToday(sp.doc.items, S.now) : 0, open = activityOpenCount(S.requests), needs = Object.keys(S.needsMap || {}).length;
-  var counts = { today: needs, sessions: 0, assistant: 0, autopilot: 0, saves: saved };
+  var bd = rfBadges(rfPendNow(), rfJobsNow(model));
+  var counts = { decide: bd.decide, sessions: 0, autopilot: bd.autopilot, saves: 0 };
   var key = JSON.stringify([S.tab, counts]), bar = $("tabbar");
   if (bar.getAttribute("data-key") === key) return;
   bar.setAttribute("data-key", key); clear(bar);
   var inner = h("div", { "class": "in" }, h("div", { "class": "brand", text: "Mission Control" }));
   TABS.forEach(function (t) {
     var n = counts[t[0]], on = S.tab === t[0];
-    inner.appendChild(h("button", { "class": "tab", type: "button", "data-k": "tab-" + t[0], "aria-current": on ? "page" : null, "aria-label": t[1] + (t[0] === "today" && n ? ", " + n + " need you" : t[0] === "saves" && n ? ", " + n + " today" : ""),
-      onclick: function () { setTab(t[0]); } }, icon(t[2], 22), h("span", { text: t[1] }), n ? h("span", { "class": "tbadge" + (t[0] === "today" ? " wait" : ""), "aria-hidden": "true", text: String(n) }) : null));
+    inner.appendChild(h("button", { "class": "tab", type: "button", "data-k": "tab-" + t[0], "aria-current": on ? "page" : null, "aria-label": t[1] + (t[0] === "decide" && n ? ", " + n + " one-tap decisions" : t[0] === "autopilot" && n ? ", " + n + " need a yes" : ""),
+      onclick: function () { setTab(t[0]); } }, icon(t[2], 22), h("span", { text: t[1] }), n ? h("span", { "class": "tbadge" + (t[0] === "decide" ? " wait" : ""), "aria-hidden": "true", text: String(n) }) : null));
   });
   bar.appendChild(inner);
 }
 function setTab(k) {
-  if (k === S.tab) { if (k === "sessions" && (S.group || S.sub || S.view !== "home")) go(null, null); else window.scrollTo(0, 0); return; }
+  if (k === S.tab) { if (k === "sessions" && S.rf.sessMode === "browse" && (S.group || S.sub || S.view !== "home")) go(null, null); else window.scrollTo(0, 0); return; }
   S.menuOpen = false; renderMenu();
   S.tab = k; S.sel = null; S.lastSig = ""; S.zoom = 1; S.panX = 0; S.panY = 0;
   render(true); window.scrollTo(0, 0);
@@ -2487,10 +2934,13 @@ function renderTabHero(model) {
   else if (S.tab === "saves") { var sp = savesPick(); cap = sp.state === "ok" ? plural(sp.doc.items.length, "save", "saves") + " this month" : ""; }
   else if (S.tab === "activity") cap = "Replies, archives and starts";
   else if (S.tab === "assistant") { var ai = S.assistInfo || assistantInfo(model.mstat); cap = ai.state === "ready" ? "Your MC Assistant on the " + ai.machine + " \u00b7 online" : ai.state === "offline" ? "Your MC Assistant \u00b7 " + ai.machine + " offline" : "Not set up yet"; }
-  else if (S.tab === "autopilot") cap = "Works while you sleep. Nothing starts without your yes.";
+  else if (S.tab === "overnight") cap = "Works while you sleep. Nothing starts without your yes.";
+  else if (S.tab === "decide") cap = "Least input first. Tap a row for the full picture.";
+  else if (S.tab === "autopilot") cap = "Jobs that run themselves. Tap one to see what is inside.";
+  else if (S.tab === "sessions") { var rm = S.model, un = rm ? rfStackList(uniq(rm), false).length : 0; cap = rm ? plural(uniq(rm).length, "chat", "chats") + ", " + un + " unsorted." : ""; }
   hero.className = "hero";
-  if (S.tab === "activity") hero.appendChild(h("button", { "class": "btn link back2", type: "button", onclick: function () { setTab("today"); }, text: "\u2039 Today" }));
-  hero.appendChild(h("div", { "class": "titlerow" }, h("h2", { "class": "large", id: "ptitle", tabindex: "-1", text: ({ today: "Today", saves: "Saves", activity: "Activity", assistant: "Assistant", autopilot: "Autopilot" })[S.tab] || "" })));
+  if (S.tab === "activity" || S.tab === "overnight" || S.tab === "assistant") hero.appendChild(h("button", { "class": "btn link back2", type: "button", onclick: function () { setTab(S.tab === "overnight" ? "autopilot" : "decide"); }, text: S.tab === "overnight" ? "\u2039 Autopilot" : "\u2039 Decide" }));
+  hero.appendChild(h("div", { "class": "titlerow" }, h("h2", { "class": "large", id: "ptitle", tabindex: "-1", text: ({ today: "Today", saves: "Saves", activity: "Activity", assistant: "Assistant", autopilot: "Autopilot", decide: "Decide", overnight: "Overnight run", sessions: "Sessions" })[S.tab] || "" })));
   if (cap) hero.appendChild(h("div", { "class": "cap", text: cap }));
 }
 
@@ -2606,13 +3056,17 @@ function renderMain(model) {
   var pb = pairBanner(model); if (pb) main.appendChild(pb);
   var ub = unverifiedNote(model); if (ub) main.appendChild(ub);
   var un = updateNote(); if (un) main.appendChild(un);
-  if (S.tab === "autopilot") { main.appendChild(autopilotNode(model)); return; }
+  if (S.tab === "decide") { main.appendChild(decideNode(model)); return; }
+  if (S.tab === "autopilot") { main.appendChild(autopilotRfNode(model)); return; }
+  if (S.tab === "overnight") { main.appendChild(autopilotNode(model)); return; }
   if (S.tab === "assistant") { main.appendChild(assistantNode(model)); if (S.assistStick !== false) setTimeout(function () { window.scrollTo(0, document.body.scrollHeight); }, 0); return; }
-  if (S.tab === "saves") { main.appendChild(savesNode(model)); focusAfter(); return; }
+  if (S.tab === "saves") { main.appendChild(rfSavesNode(model)); focusAfter(); return; }
   if (S.tab === "activity") { main.appendChild(activityNode(model)); return; }
   if (!model.loaded) { main.appendChild(emptyBox("Connecting…", "Waiting for your computers to report in.")); return; }
   if (model.neverSeen) { main.appendChild(emptyBox("No computer connected yet", "No computer connected yet. Open the Claude app on your Mac or PC with Mission Control 0.8.6+.")); return; }
   if (S.tab === "today") { main.appendChild(todayNode(model)); return; }
+  if (S.tab === "sessions" && S.rf.sessMode === "stack" && S.view !== "archive") { main.appendChild(sessionsStackNode(model)); return; }
+  if (S.tab === "sessions" && S.view === "home" && !S.group && !S.sub && S.filter === "all" && !S.query.trim()) main.appendChild(h("button", { "class": "rf-link rf-blk", type: "button", "data-k": "rf-tosort", onclick: function () { S.rf.sessMode = "stack"; render(true); window.scrollTo(0, 0); }, text: "\u2039 Sort chats" }));
   if (S.view === "archive") { main.appendChild(archiveView()); return; }
   if (!model.sessions.length) { main.appendChild(emptyBox("No sessions reported", "Your computer is connected but has not listed any sessions yet. Try Refresh in the ⋯ menu.")); return; }
   var g = S.group && model.gmap[S.group];
@@ -2880,6 +3334,7 @@ function reqState(id) {
 }
 function checkReqWatch() {
   checkQuick();
+  rfCheck();
   Object.keys(S.reqWatch).forEach(function (id) {
     var w = S.reqWatch[id], x = reqState(id), a = w.f.action;
     if (x.st === "done") { delete S.reqWatch[id]; toast(w.f.doneMsg || REQ_DONE[a] || "Done."); render(true); }
@@ -3776,19 +4231,19 @@ function saveRow(it, model, verified) {
   return item;
 }
 /** Confirm sheet for a start request: fixed brief preview (or your prompt), project picker, then Start. */
-function openStart(kind, save, skill) {
+function openStart(kind, save, skill, preset, out) {
   var model = S.model, gate = startGate(model.mstat);
   if (!gate.ok) { toast("Can't start a session: " + gate.reason + "."); return; }
   var sel = h("select", { "class": "sel", "aria-label": "Project", "data-k": "start-project" }, h("option", { value: "", text: "Default folder" }));
   model.groups.forEach(function (g) { if (g.id !== "unsorted") sel.appendChild(h("option", { value: g.id, text: g.name })); });
-  var ta = kind === "plain" ? h("textarea", { "class": "ta", "aria-label": "Prompt", maxlength: "1500", text: "Look at this saved post and tell me what is worth doing with it." }) : null;
+  var ta = kind === "plain" ? h("textarea", { "class": "ta", "aria-label": "Prompt", maxlength: "1500", text: preset || "Look at this saved post and tell me what is worth doing with it." }) : null;
   var preview = h("div", { "class": "pv", text: startFields(kind, save, { target: gate.target, skill: skill, prompt: "" }).prompt.split("\n\n").slice(kind === "plain" ? 1 : 0).join("\n\n") });
   var node = h("div", { "class": "startbox" }, ta ? h("label", { "class": "cap", text: "Your prompt" }) : null, ta, h("div", { "class": "cap", text: ta ? "The saved post goes in as quoted data:" : "Fixed brief (the saved post is quoted data):" }), preview,
     h("label", { "class": "cap", text: "Project" }), sel, h("div", { "class": "cap", text: "At most 3 sessions can be started per computer per day." }));
   S.ask = { title: kind === "research" ? "Research this save?" : kind === "skill-install" ? "Install this skill?" : "Start a session with this save?", okLabel: "Start session", body: "On " + gate.target + ". Nothing starts until you confirm.", node: node,
     ok: function () {
       var f = startFields(kind, save, { target: gate.target, skill: skill, prompt: ta ? ta.value : "", project: sel.value });
-      createRequest(f).then(function (id) { if (id) toast("Sending to your Mac\u2026"); });
+      createRequest(f).then(function (id) { if (id) { toast("Sending to your Mac\u2026"); if (out) rfSaveMark(save, out); } });
     } };
   renderDialog();
 }
@@ -4028,7 +4483,7 @@ function renderMenu() {
   var host = $("menuHost"), btn = $("moreBtn"), m = S.model;
   btn.setAttribute("aria-expanded", String(S.menuOpen));
   var pref = themePref();
-  var key = !S.menuOpen ? "closed" : JSON.stringify([pref, S.tab, activityOpenCount(S.requests), !!S.busy["list"], S.list, S.view, m ? NAMES.map(function (n) { var x = m.mstat[n]; return [x.exists, x.online, bridgeOk(x.version), Math.floor(x.lastSeen / 10000)]; }) : 0]);
+  var key = !S.menuOpen ? "closed" : JSON.stringify([pref, S.tab, rfPushText(rfPushState(rfPushRead()), NaN, 0), S.rf.push.busy, S.rf.showNames, rfData().push.vapidKey ? 1 : 0, (rfData().push.on[DEV.deviceId] || {}).lastAlertAt || 0, activityOpenCount(S.requests), !!S.busy["list"], S.list, S.view, m ? NAMES.map(function (n) { var x = m.mstat[n]; return [x.exists, x.online, bridgeOk(x.version), Math.floor(x.lastSeen / 10000)]; }) : 0]);
   var prev = host.getAttribute("data-key");
   if (prev === key) return;
   var opening = prev === null || prev === "closed", ae = document.activeElement;
@@ -4036,6 +4491,8 @@ function renderMenu() {
   host.setAttribute("data-key", key); clear(host);
   if (!S.menuOpen) { if (S.menuFocus === "btn") btn.focus(); S.menuFocus = ""; return; }
   var pop = h("div", { "class": "menu", role: "dialog", "aria-modal": "true", "aria-label": "More" });
+  pop.appendChild(rfPushRow());
+  pop.appendChild(h("button", { "class": "mi", type: "button", "data-k": "mi-assist", onclick: function () { menuClose(false); setTab("assistant"); } }, h("span", { text: "Assistant" }))); // no longer a tab: still one tap away
   pop.appendChild(h("button", { "class": "mi", type: "button", "data-k": "mi-act", onclick: function () { menuClose(false); setTab("activity"); } }, h("span", { text: "Activity" }), activityOpenCount(S.requests) ? h("span", { "class": "bg", text: String(activityOpenCount(S.requests)) }) : null));
   pop.appendChild(h("button", { "class": "mi", type: "button", "data-k": "mi-pair", onclick: function () { menuClose(false); openPair(); } }, h("span", { text: "Pair this device" })));
   pop.appendChild(h("button", { "class": "mi", type: "button", "data-k": "mi-dev", onclick: function () { menuClose(false); openDevices(); } }, h("span", { text: "Devices" })));
@@ -4248,6 +4705,7 @@ function quickCardNode(c, gate) {
   var card = h("div", { "class": "qwait", "data-qid": c.id }, head);
   if (c.done) { card.appendChild(quickDoneLine(c.done)); return card; }
   if (c.kind === "stuck") { quickWaitsOnMac(card, c); return card; }
+  var gd0 = typeof rfGatedDecFor === "function" ? rfGatedDecFor(c.id, "", c.machine) : null; if (gd0) return quickGatedCard(card, c, gd0);
   var isQ = c.kind === "question", off = !c.online || !!pend || (isQ && !gate.ok) || !!(S.model && S.model.mstat[c.machine] && S.model.mstat[c.machine].youPaired === false);
   if (isQ) {
     card.appendChild(h("div", { "class": "qq", text: "Claude asked you a question." }));
@@ -4270,6 +4728,7 @@ function quickPendCard(c, gate) {
   var head = h("div", { "class": "qttl" }, h("span", { "class": "qdot", "aria-hidden": "true" }), h("span", { "class": "qgrow", text: c.title }), c.done ? null : h("span", { "class": "qkind", text: isQ ? "Question" : "Permission" }));
   var card = h("div", { "class": "qwait", "data-qid": c.id }, head);
   if (c.done) { card.appendChild(quickDoneLine(c.done)); return card; }
+  var gd1 = typeof rfGatedDecFor === "function" ? rfGatedDecFor(it && it.sessionId, it && it.itemId, c.machine) : null; if (gd1) return quickGatedCard(card, c, gd1);
   if (!c.awayOn) { quickWaitsOnMac(card, c); return card; }
   var off = !c.online || !!pend || !gate.ok;
   if (isQ) {
@@ -4466,26 +4925,11 @@ function quickWaitPane(cards, gate) {
   });
   return f;
 }
+/** Run pane. Starting chats from the phone waits for the runner (phase 2), so there are no Start tiles (spec fix 4); replying and answering live in the Waiting pane. */
 function quickRunPane(gate, m) {
-  var f = h("div", { "class": "qpane", id: "qp-run", role: "tabpanel" }), sg = startGate(m), saved = gate.ok && m[gate.target] ? m[gate.target].saved : [];
-  f.appendChild(h("div", { "class": "qmuted qlead", text: "Each tile starts a fresh chat on the Mac. You confirm first." }));
-  var tiles = h("div", { "class": "qtiles" });
-  QA_COMMANDS.forEach(function (c) {
-    var isGn = c.cmd === "gn", ok = sg.ok && (isGn || gate.ok), target = isGn ? sg.target : gate.target;
-    tiles.appendChild(h("button", { "class": "qtile", type: "button", "data-k": "qrun-" + c.cmd, disabled: ok ? null : "", onclick: function () { quickRun(c.name, c.desc, commandFields(c.cmd, target)); } }, h("b", { text: c.name }), h("span", { text: c.sub })));
-  });
-  f.appendChild(tiles);
-  if (!sg.ok) f.appendChild(h("div", { "class": "qmuted qlead", text: "Starting from the phone is off: " + sg.reason + "." }));
-  else if (!gate.ok) f.appendChild(h("div", { "class": "qmuted qlead", text: "Only /gn works until the Mac bridge is updated (" + gate.reason + ")." }));
-  f.appendChild(h("div", { "class": "qsec", text: "Saved prompts" }));
-  if (saved.length) {
-    var st = h("div", { "class": "qtiles" });
-    saved.forEach(function (p) {
-      st.appendChild(h("button", { "class": "qtile", type: "button", "data-k": "qsaved-" + p.id, disabled: sg.ok && gate.ok ? null : "", onclick: function () { quickRun("Saved: " + p.title, p.desc || "Runs the saved prompt “" + p.title + "” from the Mac’s list.", savedFields(p.id, gate.target)); } }, h("b", { text: p.title }), h("span", { text: p.desc })));
-    });
-    f.appendChild(st);
-  } else f.appendChild(h("div", { "class": "qmuted", text: "No saved prompts on the Mac yet." }));
-  f.appendChild(h("div", { "class": "qmuted qfoot", text: "Saved prompts come from the Mac's list. Add or edit them at the Mac (keeps the list on the trusted side)." }));
+  var f = h("div", { "class": "qpane", id: "qp-run", role: "tabpanel" });
+  f.appendChild(h("div", { "class": "qcard", "data-k": "qrun-later" }, h("b", { text: "Starting chats" }), h("div", { "class": "qmuted", style: "margin-top:4px", text: "Starting chats from the phone comes with the runner (phase 2)." }),
+    h("div", { "class": "qmuted", style: "margin-top:8px", text: "Replying to a chat and answering its questions still work from the Waiting tab." })));
   return f;
 }
 /* The old Archive pane (r3). Replaced in the sheet by Tidy (r4, mock v4); kept only because its pure rules and tests still stand. */
@@ -4784,6 +5228,685 @@ function renderQuick() {
 }
 
 /* @quick-ui-end */
+/* @refocus-ui-start */
+/* ---------- refocus UI: Decide, decision sheet, Autopilot jobs, the card stack, Saves restyle, notifications. Mock: mocks/refocus-v2.html (direction A, sorting view 2).
+   Everything shown comes through h() / textContent; links only after rfHref(). Every action is one signed request (createRequest); the Mac decides. ---------- */
+var RF_DEC_ASKS = ["What is that?", "Where do I get it?", "What if I skip it?", "Can you do it for me?"];
+var RF_JOB_ASKS = ["What are these tasks?", "Is it safe?", "How long will it take?", "What if I skip one?"];
+var RF_HOLD_MS = 10000;
+function rfData() { return S.rfd || rfMerge([]); }
+/** The gated decision (gate, or a broken gate) that belongs to this chat or pending item, or null. A gated decision is answered ONLY on its yes screen, so every other answer path (Quick sheet, reply box) refuses it. */
+function rfGatedDecFor(sessionId, itemId, machine) {
+  var ds = rfData().decisions || [];
+  for (var i = 0; i < ds.length; i++) {
+    var d = ds[i]; if (!d || !(d.gate || d.gateBad) || (machine && d.machine && d.machine !== machine)) continue;
+    if ((itemId && d.itemId === itemId) || (sessionId && d.sessionId === sessionId)) return d;
+  }
+  return null;
+}
+/** The Quick sheet card for an item whose decision is gated: no option buttons, no typed reply; only "Review and say yes", which opens the decision sheet. */
+function quickGatedCard(card, c, d) {
+  card.appendChild(h("div", { "class": "qq", text: c.ask || d.ask }));
+  card.appendChild(h("div", { "class": "qmuted", "data-k": "qgated-note-" + c.id, text: "This one needs your yes on a screen that shows every detail." }));
+  card.appendChild(h("div", { "class": "qrow" }, h("button", { "class": "qbtn2", type: "button", "data-k": "qgated-" + c.id, onclick: function () { closeQuick(); rfOpenDec(d.id, null); }, text: "Review and say yes" })));
+  return card;
+}
+function rfPendNow() { return rfPending(rfData().decisions, S.rf.local, Date.now()); }
+function rfDec(id) { return rfData().decisions.filter(function (d) { return d.id === id; })[0] || null; }
+function rfPendItems() { return quickR4().pending; }
+function rfAreas(model) { var R = rfData(); return R.known ? R.areas : cleanAreas((model.groups || []).map(function (g) { return { id: g.id, name: g.name }; })); }
+function rfCompute(model) {
+  S.rfd = rfMerge(NAMES.map(function (n) { return { name: n, rf: model.mstat[n].rf }; }));
+}
+function rfKey(model) {
+  var R = rfData(), now = Date.now();
+  return JSON.stringify([R.known, R.decisions.map(function (d) { return [d.id, d.effort, d.ask, d.project, d.area.id, d.snoozedUntil > now, !!S.rf.local[d.id]]; }), R.cleared.map(function (c) { return [c.id, c.outcome, c.undo]; }),
+    Object.keys(S.rf.local).map(function (k) { return [k, S.rf.local[k].outcome, S.rf.local[k].undo]; }), R.jobs.map(function (j) { return [j.id, j.status, j.progress, j.summary, j.tasks.map(function (t) { return [t.id, t.status]; })]; }), Object.keys(S.rf.overlay).length,
+    S.rf.order, S.rf.sessMode, S.rf.saveFilter, S.rf.stack.all, Object.keys(S.rf.stack.seen).join(), S.rf.stack.last && [S.rf.stack.last.sid, S.rf.stack.last.state, S.rf.stack.last.applyId], S.byId ? Object.keys(S.byId).length : 0, S.model ? S.model.sessions.map(function (s) { return [s.id, rfAreaOf(s), s.title]; }) : 0,
+    NAMES.map(function (n) { var t = S.model && S.model.mstat[n].tidy; return t ? t.at + ":" + t.items.length : 0; })]);
+}
+function rfTone(areaId) { var t = rfAreaTone(areaId, rfData().areas); return t < 0 ? "u" : String(t); }
+function rfMeter(e) { var m = h("span", { "class": "rf-meter e" + e, "aria-hidden": "true" }); for (var i = 1; i <= 5; i++) m.appendChild(h("i", { "class": i <= e ? "on" : "" })); return m; }
+function rfChip(text, cls) { return h("span", { "class": "rf-chip " + cls, text: text }); }
+function rfBtn(text, o) {
+  o = o || {};
+  return h("button", { "class": "rf-btn" + (o.cls ? " " + o.cls : ""), type: "button", "data-k": o.k || null, disabled: o.disabled ? "" : null, title: o.title || null, "aria-label": o.label || null, "aria-pressed": o.pressed === undefined ? null : String(o.pressed), onclick: o.on || null }, text);
+}
+function rfSec(left, right) { return h("div", { "class": "rf-sec" }, h("span", { text: left }), right === undefined || right === null ? null : h("span", { text: String(right) })); }
+function rfHead(title, sub) { return h("div", { "class": "rf-hd" }, h("h3", { text: title }), sub ? h("p", { "class": "rf-sub", text: sub }) : null); }
+function rfLog(text) { try { if (S.rf.debug) console.log("[rf] " + text); } catch (e) {} }
+/* ----- one place that sends a refocus request and follows it ----- */
+function rfSend(f, w) {
+  return createRequest(f, { noWatch: true }).then(function (rid) {
+    if (rid) S.rf.reqs[rid] = Object.assign({ at: Date.now(), f: f }, w || {});
+    return rid;
+  });
+}
+function rfCheck() {
+  var now = Date.now(), R = rfData(), changed = false;
+  Object.keys(S.rf.reqs).forEach(function (rid) {
+    var w = S.rf.reqs[rid], x = reqState(rid), fail = null;
+    if (x.st === "done") { delete S.rf.reqs[rid]; if (w.onDone) w.onDone(x.r); changed = true; }
+    else if (x.st === "error") { fail = friendlyError(w.f.action, x.r.error || x.r.result || "unknown error"); }
+    else if (now - w.at > 300000) fail = "No answer from your Mac in 5 minutes. Is it awake?";
+    if (fail !== null) { delete S.rf.reqs[rid]; if (w.onFail) w.onFail(fail); toast(fail); changed = true; }
+  });
+  var day = new Date(now).toDateString();
+  Object.keys(S.rf.local).forEach(function (id) {
+    var l = S.rf.local[id]; if (l.hold) return;
+    var inMac = R.cleared.some(function (c) { return c.id === id; }), inPend = R.decisions.some(function (d) { return d.id === id; });
+    if (inMac || new Date(l.at).toDateString() !== day || (inPend && now - l.at > 120000)) { delete S.rf.local[id]; changed = true; }
+  });
+  Object.keys(S.rf.askPend).forEach(function (id) { // the Mac's answer arrived (same question in the thread), or 90 s passed
+    var p = S.rf.askPend[id], got = (R.asks[id] || []).some(function (x) { return x.q === p.q && (!isFinite(x.at) || x.at >= p.at - 120000); });
+    if (got) { delete S.rf.askPend[id]; changed = true; }
+    else if (now - p.at > 90000) { delete S.rf.askPend[id]; toast("No answer yet. Try asking again."); changed = true; }
+  });
+  Object.keys(S.rf.undone).forEach(function (id) { if (now - S.rf.undone[id] > 120000 || R.decisions.some(function (d) { return d.id === id; })) { delete S.rf.undone[id]; changed = true; } });
+  Object.keys(S.rf.overlay).forEach(function (k) {
+    var o = S.rf.overlay[k], hit = R.jobs.some(function (j) { return j.tasks.some(function (t) { return j.id + ":" + t.id === k && t.status === o.status; }); });
+    if (hit || now - o.at > 60000) { delete S.rf.overlay[k]; changed = true; }
+  });
+  var sh = S.rf.sheet;
+  if (sh && sh.type === "dec" && rfData().known && !rfDec(sh.id) && !S.rf.local[sh.id]) { rfCloseSheet(true); toast("Already answered"); changed = true; }
+  rfDeepLink();
+  var sub = S.rf.push.sub, tgt = R.push.machine;
+  if (rfResubNeeded({ subscribed: !!sub, known: R.known, vapidKey: R.push.vapidKey, listed: !!R.push.on[DEV.deviceId], busy: S.rf.push.busy, done: S.rf.push.resub, ageMs: now - S.rf.pageAt })) {
+    S.rf.push.resub = true;
+    var j = sub.toJSON ? sub.toJSON() : {}, rf = rfPushSubFields({ endpoint: j.endpoint, p256dh: j.keys && j.keys.p256dh, auth: j.keys && j.keys.auth }, tgt);
+    if (rf) rfSend(rf, {});
+  }
+  if (changed) render(true);
+}
+/* ----- answers: held for 10 s so Undo is real (a sent answer cannot be unsent), flushed at once when the app is hidden ----- */
+function rfLocalSet(d, outcome, o) { S.rf.local[d.id] = Object.assign({ machine: d.machine, project: d.project, outcome: outcome, at: Date.now(), undo: true, hold: false }, o || {}); }
+function rfHold(d, outcome, make) {
+  rfLocalSet(d, outcome, { hold: true, undo: true });
+  var hd = { make: make, d: d, timer: setTimeout(function () { rfCommit(d.id); }, RF_HOLD_MS) };
+  S.rf.hold[d.id] = hd;
+  rfCloseSheet(true);
+  toast(outcome, { undo: function () { rfCancel(d.id); }, ms: RF_HOLD_MS });
+  render(true);
+}
+function rfCancel(id) {
+  var hd = S.rf.hold[id]; if (!hd) return;
+  clearTimeout(hd.timer); delete S.rf.hold[id]; delete S.rf.local[id]; toast("Undone"); render(true);
+}
+function rfCommit(id) {
+  var hd = S.rf.hold[id]; if (!hd) return;
+  clearTimeout(hd.timer); delete S.rf.hold[id];
+  var l = S.rf.local[id]; if (l) { l.hold = false; l.undo = false; l.at = Date.now(); }
+  var f = hd.make();
+  if (!f) { delete S.rf.local[id]; toast("That changed or is gone, so nothing was sent."); render(true); return; }
+  rfSend(f, { id: id, onFail: function () { delete S.rf.local[id]; } }).then(function (rid) { if (!rid) { delete S.rf.local[id]; render(true); } });
+  render(true);
+}
+function rfFlush() { Object.keys(S.rf.hold).forEach(function (id) { rfCommit(id); }); }
+/** The decision as the user saw it is still the decision on the Mac (same question, options, prompt hash and gate); if not, nothing is sent for the old screen. */
+function rfSame(a, b) {
+  return !!a && !!b && a.id === b.id && a.kind === b.kind && a.inputHash === b.inputHash && a.ask === b.ask && JSON.stringify(a.options) === JSON.stringify(b.options) && JSON.stringify(a.steps) === JSON.stringify(b.steps) && JSON.stringify(a.gate) === JSON.stringify(b.gate) && JSON.stringify(a.gateRaw) === JSON.stringify(b.gateRaw) && a.canDoIt === b.canDoIt;
+}
+/** An answer to one decision. The request is built at send time from the decision as it is THEN, and only if it is still the one that was shown. */
+function rfAnswer(d, ans, outcome) {
+  rfHold(d, outcome, function () {
+    var now = rfDec(d.id); if (!rfSame(d, now)) return null;
+    return rfAnswerFields(now, ans, now.machine);
+  });
+}
+function rfPermAnswer(d, decision) {
+  rfHold(d, decision === "allow" ? "Allowed once" : "Denied", function () {
+    var now = rfDec(d.id), item = rfSame(d, now) ? rfPermItem(now, rfPendItems()) : null;
+    return item && item.inputHash === d.inputHash ? permFields(item, decision) : null;
+  });
+}
+function rfQuestionAnswer(d, label) {
+  rfHold(d, "Answered: " + label, function () {
+    var now = rfDec(d.id), item = rfSame(d, now) ? rfPermItem(now, rfPendItems()) : null;
+    return item && item.kind === "question" && item.inputHash === d.inputHash ? qAnswerFields(item, [label], null) : null;
+  });
+}
+function rfReversible(d, f, outcome, label) {
+  if (!f) { toast("That looks wrong, so nothing was sent."); return; }
+  rfLocalSet(d, outcome, { undo: true }); rfCloseSheet(true);
+  rfSend(f, { id: d.id, onFail: function () { delete S.rf.local[d.id]; } }).then(function (rid) {
+    if (!rid) { delete S.rf.local[d.id]; render(true); return; }
+    toast(label || outcome, { undo: function () { rfUndo(d.id, d.machine); }, ms: RF_HOLD_MS });
+  });
+  render(true);
+}
+function rfUndo(id, machine) {
+  var f = rfIdFields("decision-undo", { id: id }, machine); if (!f) return;
+  var l = S.rf.local[id]; delete S.rf.local[id]; S.rf.undone[id] = Date.now(); render(true);
+  rfSend(f, { id: id, onDone: function () { toast("Undone"); }, onFail: function () { delete S.rf.undone[id]; if (l) S.rf.local[id] = l; } });
+}
+function rfUndoClicked(c) { if (c.mine && S.rf.hold[c.id]) rfCancel(c.id); else rfUndo(c.id, c.machine); }
+function rfSnooze(d, kind) {
+  var until = rfSnoozeUntil(kind, Date.now());
+  rfReversible(d, rfSnoozeFields(d, until, d.machine), rfSnoozeText(kind, until), rfSnoozeText(kind, until));
+}
+function rfDismiss(d) { rfReversible(d, rfIdFields("decision-dismiss", d, d.machine), "Not doing (archived)", "Archived. Undo from Cleared today."); }
+function rfDoGo(d) {
+  rfHold(d, "Claude is on it", function () { var now = rfDec(d.id); return rfSame(d, now) ? rfDoitFields(now, "", now.machine) : null; });
+}
+/** The yes screen's button: hash the gate shown, send exactly that. Nothing is sent before this tap. */
+async function rfDoGated(d) {
+  if (S.rf.gateBusy) return; S.rf.gateBusy = true; renderDec();
+  try {
+    var ga = S.rf.gateAns && S.rf.gateAns.id === d.id ? S.rf.gateAns : null, av = ga ? (ga.answers !== undefined ? ga.answers : ga.answer) : undefined;
+    var hash = await rfActionHash(d.id, d.gateRaw, function (b) { return crypto.subtle.digest("SHA-256", b); }, av), same = rfSame(d, rfDec(d.id));
+    var f = !same ? null : ga ? rfAnswerFields(d, ga.answers !== undefined ? { answers: ga.answers } : { answer: ga.answer }, d.machine, hash) : rfDoitFields(d, hash, d.machine);
+    if (!f) { toast("That looks wrong, so nothing was sent."); return; }
+    S.rf.gate = ""; S.rf.gateAns = null; rfLocalSet(d, ga ? "Answered: " + (ga.answers !== undefined ? ga.answers.join(", ") : ga.answer).slice(0, 40) : "Claude is getting it ready", { undo: false }); rfCloseSheet(true);
+    var rid = await rfSend(f, { id: d.id, onFail: function () { delete S.rf.local[d.id]; }, onDone: function () { toast("Claude has it ready. You do the last step."); } });
+    if (!rid) delete S.rf.local[d.id]; else toast(ga ? "Sent your answer." : "Sent. Claude gets it ready; you do the last step.");
+  } catch (e) { toast("Couldn’t build the yes, so nothing was sent."); }
+  finally { S.rf.gateBusy = false; render(true); renderDec(); }
+}
+function rfAsk(d, q) {
+  var f = rfAskFields(d, q, d.machine); if (!f) { toast("Type a question first (up to 300 characters)."); return; }
+  if (S.rf.askPend[d.id]) return;
+  S.rf.askPend[d.id] = { q: str(q).trim(), at: Date.now() };
+  S.rf.vals["ask:" + d.id] = ""; renderDec();
+  rfSend(f, { id: d.id, onFail: function () { delete S.rf.askPend[d.id]; renderDec(); } }).then(function (rid) { if (!rid) { delete S.rf.askPend[d.id]; renderDec(); } });
+}
+/* ----- Decide tab ----- */
+function rfOpenDec(id, opener) {
+  S.rf.sheet = { type: "dec", id: id }; S.rf.snz = false; S.rf.confirm = ""; S.rf.gate = ""; S.rf.gateAns = null; S.rf.opener = opener || document.activeElement; renderDec();
+}
+function rfClearedRow(c) {
+  return h("div", { "class": "rf-row done" }, h("div", { "class": "rf-grow" }, h("div", { "class": "rf-proj", text: c.project }), h("div", { "class": "rf-q", text: c.outcome })),
+    c.undo ? h("button", { "class": "rf-link", type: "button", "data-k": "rf-undo-" + c.id, "aria-label": "Undo: " + c.project, onclick: function () { rfUndoClicked(c); }, text: "Undo" }) : null);
+}
+function rfDecRow(d) {
+  return h("div", { "class": "rf-row" }, h("button", { "class": "rf-dmain", type: "button", "data-k": "rf-dec-" + d.id, onclick: function (e) { rfOpenDec(d.id, e.currentTarget); } },
+    rfMeter(d.effort), h("span", { "class": "rf-dtxt" }, h("span", { "class": "rf-proj", text: d.project }), h("span", { "class": "rf-q", text: d.ask })), rfChip(RF_EFFORT[d.effort], "e" + d.effort)));
+}
+function decideNode(model) {
+  var f = document.createDocumentFragment(), R = rfData(), now = Date.now();
+  if (!model.loaded) return emptyBox("Connecting…", "Waiting for your computers to report in.");
+  if (!R.known) return emptyBox("Decisions need a Mac update", "Your Mac isn’t sending decisions yet. Update Mission Control on the Mac, then reopen this.");
+  var pend = rfPendNow(), cl = rfClearedList(R.cleared, S.rf.local, S.rf.undone, now), sm = rfSummary(pend, cl.length);
+  f.appendChild(h("div", { "class": "rf-summary", "data-k": "rf-summary" }, h("div", { "class": "rf-grow" }, h("div", { "class": "rf-strong", text: sm.text }), h("div", { "class": "rf-tiny", text: sm.clearedText })),
+    h("div", { "class": "rf-bar", role: "progressbar", "aria-label": "Cleared today", "aria-valuemin": "0", "aria-valuemax": "100", "aria-valuenow": String(sm.pct) }, h("i", { style: "width:" + sm.pct + "%" }))));
+  var seg = h("div", { "class": "rf-seg2", role: "group", "aria-label": "Sort decisions" });
+  [["effort", "By effort"], ["area", "By area"]].forEach(function (o) { seg.appendChild(h("button", { type: "button", "data-k": "rf-order-" + o[0], "aria-pressed": String(S.rf.order === o[0]), onclick: function () { S.rf.order = o[0]; lsSet("mc-rf-order", o[0]); render(true); }, text: o[1] })); });
+  f.appendChild(h("div", { "class": "rf-sec" }, h("span", { text: "Order" }), seg));
+  if (!pend.length) f.appendChild(h("div", { "class": "rf-empty", "data-k": "rf-allclear" }, h("b", { text: "Nothing waiting." }), h("span", { text: " Enjoy the quiet." })));
+  var groups = S.rf.order === "area" ? rfByArea(pend, rfAreas(model)) : rfByEffort(pend);
+  groups.forEach(function (g) {
+    var head = S.rf.order === "area"
+      ? h("div", { "class": "rf-sec" }, h("span", { "class": "rf-areahd" }, h("span", { "class": "rf-dot a" + rfTone(g.areaId), "aria-hidden": "true" }), h("span", { text: g.label })), h("span", { text: String(g.items.length) }))
+      : h("div", { "class": "rf-sec e" + g.effort, "data-k": "rf-grp-" + g.key }, h("span", { text: g.label }), h("span", { text: String(g.items.length) }));
+    f.appendChild(head);
+    var grp = h("div", { "class": "rf-grp" }); g.items.forEach(function (d) { grp.appendChild(rfDecRow(d)); }); f.appendChild(grp);
+  });
+  if (cl.length) {
+    f.appendChild(rfSec("Cleared today", cl.length));
+    var cg = h("div", { "class": "rf-grp", "data-k": "rf-cleared" }); cl.forEach(function (c) { cg.appendChild(rfClearedRow(c)); }); f.appendChild(cg);
+  }
+  return f;
+}
+/* ----- the decision sheet ----- */
+function rfCloseSheet(quiet) {
+  if (!S.rf.sheet) return;
+  var op = S.rf.opener; S.rf.sheet = null; S.rf.opener = null; S.rf.gate = ""; S.rf.gateAns = null; S.rf.snz = false; S.rf.confirm = "";
+  renderDec();
+  if (!quiet && op && op.isConnected && op.focus) try { op.focus(); } catch (e) {}
+}
+function rfAskBlock(key, chips, thread, pending, onAsk, hint) {
+  var f = document.createDocumentFragment();
+  f.appendChild(h("div", { "class": "rf-shsec" }, h("span", { text: "Ask about this" })));
+  var cw = h("div", { "class": "rf-qchips", role: "group", "aria-label": "Ask about this" });
+  chips.forEach(function (c) { cw.appendChild(h("button", { "class": "rf-chipbtn", type: "button", "data-k": "rf-chip-" + c.replace(/\W+/g, "-").toLowerCase(), disabled: pending ? "" : null, onclick: function () { onAsk(c); }, text: c })); });
+  f.appendChild(cw);
+  thread.forEach(function (x) { f.appendChild(h("div", { "class": "rf-msg q", text: x.q })); f.appendChild(h("div", { "class": "rf-msg a", text: x.a })); });
+  if (pending) { f.appendChild(h("div", { "class": "rf-msg q", text: pending.q })); f.appendChild(h("div", { "class": "rf-msg a wait", role: "status", text: hint || "Asking the Mac… up to 30 seconds." })); }
+  var inp = h("input", { "class": "rf-inp", type: "text", "data-k": "rf-ask-" + key, "data-ask": "1", placeholder: "Ask anything about this", "aria-label": "Ask about this", maxlength: "300", value: S.rf.vals["ask:" + key] || "" });
+  inp.addEventListener("input", function () { S.rf.vals["ask:" + key] = inp.value; });
+  inp.addEventListener("keydown", function (e) { if (e.key === "Enter") { e.preventDefault(); if (!pending) onAsk(inp.value); } });
+  f.appendChild(h("div", { "class": "rf-askrow" }, inp, rfBtn("Ask", { cls: "pri", k: "rf-ask-send", disabled: !!pending, on: function () { onAsk(inp.value); } })));
+  return f;
+}
+function rfAnswerBox(d) {
+  var box = h("div", { "class": "rf-ansbox", "data-ans": "1" }), tgt = d.machine;
+  if ((d.kind === "choice" || d.kind === "text") && (d.gate || d.gateBad)) {
+    // risky action: no plain Yes button and no typed yes; only the yes screen (which shows every detail) can say yes
+    box.appendChild(h("div", { "class": "rf-note", "data-k": "rf-gated-note", text: d.gate ? "This one needs your yes on a screen that shows every detail. Pick an answer, then confirm it there." : "The Mac sent this one without usable details, so it can’t be approved from here. Open the full chat." }));
+    if (d.gate && d.kind === "choice" && d.options.length) {
+      // an answer is picked here, then confirmed on the yes screen, which shows the gate AND the exact answer; nothing is sent from this screen
+      var gitem = d.inputHash ? rfPermItem(d, rfPendItems()) : null, gmulti = !!(gitem && gitem.kind === "question" && gitem.multiSelect), gsel = S.rf.gateSel[d.id] || (S.rf.gateSel[d.id] = []), grow = h("div", { "class": "rf-acts" });
+      d.options.forEach(function (o, i) {
+        var on = gsel.indexOf(o) >= 0;
+        grow.appendChild(rfBtn(o, { cls: !gmulti && i === 0 ? "pri" : on ? "pri" : "", k: "rf-gpick-" + i, on: function () {
+          if (!gmulti) { S.rf.gateAns = { id: d.id, answer: o }; S.rf.gate = d.id; renderDec(); return; }
+          var j = gsel.indexOf(o); if (j >= 0) gsel.splice(j, 1); else if (gsel.length < QA_MULTI_MAX) gsel.push(o); else toast("At most " + QA_MULTI_MAX + " answers.");
+          renderDec();
+        } }));
+      });
+      box.appendChild(grow);
+      if (gmulti) box.appendChild(h("div", { "class": "rf-acts" }, rfBtn("Review your answer", { cls: "pri", k: "rf-gmulti-review", disabled: !gsel.length, on: function () { var pk = d.options.filter(function (x) { return gsel.indexOf(x) >= 0; }); if (!pk.length) return; S.rf.gateAns = { id: d.id, answers: pk }; S.rf.gate = d.id; renderDec(); } })));
+    } else if (d.gate && d.kind === "text") {
+      var gv = S.rf.vals[d.id] || "", ginp = h(d.multiline ? "textarea" : "input", { "class": "rf-inp" + (d.multiline ? " ta" : ""), type: d.multiline ? null : "text", "data-k": "rf-gtext", placeholder: d.placeholder || "Your answer", "aria-label": d.placeholder || "Your answer", maxlength: "1000" });
+      if (d.multiline) ginp.value = gv; else ginp.setAttribute("value", gv);
+      ginp.addEventListener("input", function () { S.rf.vals[d.id] = ginp.value; ginp.classList.remove("bad"); });
+      box.appendChild(ginp);
+      box.appendChild(h("div", { "class": "rf-acts" }, rfBtn("Review your answer", { cls: "pri", k: "rf-gsend", on: function () {
+        var t = S.rf.vals[d.id] || ""; if (!t.trim()) { ginp.classList.add("bad"); ginp.focus(); return; }
+        if (!rfAnswerFields(d, { answer: t }, d.machine, "0".repeat(64))) { toast("That answer has characters it can\u2019t carry. Edit it and try again."); return; }
+        S.rf.gateAns = { id: d.id, answer: t }; S.rf.gate = d.id; renderDec();
+      } })));
+    }
+    if (d.gate) box.appendChild(h("div", { "class": "rf-acts" }, rfBtn("Review and say yes", { cls: d.kind === "choice" || d.kind === "text" ? "" : "pri", k: "rf-gated-review", on: function () { S.rf.gateAns = null; S.rf.gate = d.id; renderDec(); } })));
+  } else if (d.kind === "choice") {
+    var item = d.inputHash ? rfPermItem(d, rfPendItems()) : null, viaQ = item && item.kind === "question";
+    if (!d.options.length) box.appendChild(h("div", { "class": "rf-note", text: "Open the full chat to answer this one." }));
+    var row = h("div", { "class": "rf-acts" });
+    d.options.forEach(function (o, i) { row.appendChild(rfBtn(o, { cls: i === 0 ? "pri" : "", k: "rf-pick-" + i, on: function () { if (viaQ) rfQuestionAnswer(d, o); else rfAnswer(d, { answer: o }, "Answered: " + o); } })); });
+    box.appendChild(row);
+  } else if (d.kind === "text") {
+    var val = S.rf.vals[d.id] || "", inp = h(d.multiline ? "textarea" : "input", { "class": "rf-inp" + (d.multiline ? " ta" : ""), type: d.multiline ? null : "text", "data-k": "rf-text", placeholder: d.placeholder || "Your answer", "aria-label": d.placeholder || "Your answer", maxlength: "1000" });
+    if (d.multiline) inp.value = val; else inp.setAttribute("value", val);
+    inp.addEventListener("input", function () { S.rf.vals[d.id] = inp.value; inp.classList.remove("bad"); });
+    box.appendChild(inp);
+    box.appendChild(h("div", { "class": "rf-acts" }, rfBtn("Send", { cls: "pri", k: "rf-send", on: function () {
+      var t = S.rf.vals[d.id] || ""; if (!t.trim()) { inp.classList.add("bad"); inp.focus(); return; }
+      if (!rfAnswerFields(d, { answer: t }, tgt)) { toast("That answer has characters it can’t carry. Edit it and try again."); return; }
+      rfAnswer(d, { answer: t }, "Sent: " + t.trim().slice(0, 40));
+    } })));
+  } else if (d.kind === "steps") {
+    var ch = S.rf.checks[d.id] || (S.rf.checks[d.id] = []), steps = h("div", { "class": "rf-steps" }), all = d.steps.length && d.steps.every(function (_, i) { return ch[i]; });
+    d.steps.forEach(function (s, i) {
+      var cb = h("input", { type: "checkbox", "data-k": "rf-step-" + i, "aria-label": s });
+      cb.checked = !!ch[i];
+      cb.addEventListener("change", function () { ch[i] = cb.checked; renderDec(); });
+      steps.appendChild(h("label", { "class": "rf-step" }, cb, h("span", { text: s })));
+    });
+    box.appendChild(steps);
+    box.appendChild(h("div", { "class": "rf-acts" }, rfBtn("All done", { cls: "pri", k: "rf-stepsdone", disabled: !all, on: function () { rfAnswer(d, { ticked: d.steps.map(function (_, i) { return !!ch[i]; }) }, "All steps ticked"); } })));
+  } else if (d.kind === "queue") {
+    box.appendChild(h("div", { "class": "rf-acts" }, rfBtn("Queue for the Mac", { cls: "pri", k: "rf-queue", on: function () { rfAnswer(d, {}, "Queued for the Mac"); } }), h("span", { "class": "rf-tiny", text: "Shows up on the Mac when you sit down." })));
+  } else if (d.kind === "pay") {
+    var g = d.gate, line = g ? g.item + (g.amount ? ": " + g.amount : "") + (g.fee && !/^free$/i.test(g.fee) ? " + " + g.fee + " fee" : "") : "";
+    box.appendChild(h("div", { "class": "rf-note", text: (line ? line + ". " : "") + "You pay this yourself; Claude never does." }));
+    var conf = S.rf.confirm === d.id;
+    box.appendChild(h("div", { "class": "rf-acts" }, conf
+      ? [rfBtn("Tap again: I have paid both", { cls: "bad", k: "rf-paid2", on: function () { rfAnswer(d, { confirmed: true }, "Marked paid"); } }), rfBtn("Not yet", { k: "rf-payno", on: function () { S.rf.confirm = ""; renderDec(); } })]
+      : rfBtn("Mark as paid", { cls: "pri", k: "rf-paid", on: function () { S.rf.confirm = d.id; renderDec(); } })));
+  } else if (d.kind === "permission") {
+    var p = rfPermItem(d, rfPendItems());
+    if (!p) box.appendChild(h("div", { "class": "rf-note", text: "This prompt is no longer on the Mac." }));
+    else {
+      box.appendChild(h("div", { "class": "rf-tiny", text: permLead(p) }));
+      box.appendChild(h("pre", { "class": "rf-ctx rf-cmd", "data-k": "rf-cmd", text: p.kind === "question" ? p.question : p.summary }));
+      if (p.kind === "permission") {
+        if (p.clipped || !p.approvable) box.appendChild(h("div", { "class": "rf-note", text: p.why === "too-long" ? "Too long to check on a phone, so it can only be denied here." : "This one can only be allowed at the Mac. You can deny it here." }));
+        box.appendChild(h("div", { "class": "rf-acts" }, rfBtn("Allow once", { cls: "pri", k: "rf-allow", disabled: !p.approvable, on: function () { rfPermAnswer(d, "allow"); } }), rfBtn("Deny", { cls: "bad", k: "rf-deny", on: function () { rfPermAnswer(d, "deny"); } })));
+      }
+    }
+  }
+  return box;
+}
+function rfGateScreen(d) {
+  var g = d.gate, w = h("div", { "class": "rf-gate", "data-k": "rf-gate" });
+  w.appendChild(h("h3", { text: g.kind === "choice" ? "Send this answer?" : "Say yes to this one" }));
+  w.appendChild(h("p", { "class": "rf-note", text: (g.kind === "choice" ? "" : "This is " + RF_GATE_WORD[g.kind] + ". ") + (S.rf.gateAns && S.rf.gateAns.id === d.id ? "Your answer goes to the chat only if you say yes here." : g.kind === "choice" ? "Pick an answer on the previous screen first. Nothing is sent from here." : "Claude gets it ready. You do the last step (card, password or code).") }));
+  var dl = h("dl", { "class": "rf-dl" });
+  rfGateLines(g).forEach(function (l) { dl.appendChild(h("dt", { text: l[0] })); dl.appendChild(h("dd", { text: l[1] })); });
+  w.appendChild(dl);
+  var ga = S.rf.gateAns && S.rf.gateAns.id === d.id ? S.rf.gateAns : null;
+  if (ga) w.appendChild(h("p", { "class": "rf-note rf-strong", "data-k": "rf-gate-answer", style: "color:var(--text,inherit);font-size:16px", text: (g.kind === "choice" ? "Send this answer: " : "Your answer: ") + (ga.answers !== undefined ? ga.answers.join(", ") : ga.answer) }));
+  if (g.handoffUrl) w.appendChild(h("p", { "class": "rf-tiny" }, "Hand-over page: ", h("a", { href: g.handoffUrl, target: "_blank", rel: "noopener noreferrer", text: g.handoffUrl.replace(/^https:\/\//, "").slice(0, 60) })));
+  w.appendChild(h("p", { "class": "rf-tiny", text: "This yes is for exactly these details" + (S.rf.gateAns && S.rf.gateAns.id === d.id ? " and exactly this answer" : "") + " and runs out after 15 minutes." }));
+  var noPick = g.kind === "choice" && !ga; // A1: a choice gate opened with no answer picked has nothing to send
+  w.appendChild(h("div", { "class": "rf-acts" }, noPick ? null : rfBtn(S.rf.gateBusy ? "Sending…" : g.kind === "choice" ? "Yes, send this answer" : "Yes, do this one", { cls: "pri", k: "rf-gate-yes", disabled: !!S.rf.gateBusy, on: function () { rfDoGated(d); } }), rfBtn(noPick ? "Back" : "Not now", { k: "rf-gate-no", on: function () { S.rf.gate = ""; S.rf.gateAns = null; renderDec(); } })));
+  return w;
+}
+function rfOpt(label, sub, o) {
+  o = o || {};
+  return h("button", { "class": "rf-opt" + (o.cls ? " " + o.cls : ""), type: "button", "data-k": o.k || null, disabled: o.disabled ? "" : null, onclick: o.on }, h("span", { text: label }), sub ? h("small", { text: sub }) : null);
+}
+/** The question still waiting for the Mac's answer, unless the answer is already in the thread. */
+function rfAskWaiting(id) { var p = S.rf.askPend[id]; return p && !(rfData().asks[id] || []).some(function (x) { return x.q === p.q; }) ? p : null; }
+function rfDecBody(d) {
+  var f = document.createDocumentFragment(), tone = rfTone(d.area.id), asks = rfData().asks[d.id] || [], pend = rfAskWaiting(d.id);
+  if (S.rf.gate === d.id && d.gate) { f.appendChild(rfGateScreen(d)); return f; }
+  f.appendChild(h("div", { "class": "rf-shhead" }, h("span", { "class": "rf-chip a" + tone }, h("span", { "class": "rf-dot a" + tone, "aria-hidden": "true" }), d.project)));
+  f.appendChild(h("h3", { "class": "rf-title", id: "rf-title", tabindex: "-1", text: d.ask }));
+  f.appendChild(h("div", { "class": "rf-effline" }, rfChip(RF_EFFORT[d.effort], "e" + d.effort)));
+  var info = document.createDocumentFragment(), away = d.source === "away";
+  info.appendChild(h("div", { "class": "rf-shsec" }, h("span", { text: "What’s being asked" })));
+  info.appendChild(h("p", { "class": "rf-body", text: d.what || "No details yet. Open the full chat." }));
+  info.appendChild(h("div", { "class": "rf-shsec" }, h("span", { text: "Why it matters" })));
+  info.appendChild(h("p", { "class": "rf-body", text: d.why || "No reason given." }));
+  info.appendChild(h("div", { "class": "rf-shsec" }, h("span", { text: "Where to get it" })));
+  var ol = h("ol", { "class": "rf-ol" });
+  d.where.forEach(function (w) { ol.appendChild(h("li", null, w.href ? h("a", { href: w.href, target: "_blank", rel: "noopener noreferrer", text: w.text }) : w.text)); });
+  if (!d.where.length) ol.appendChild(h("li", { text: "Nothing to fetch." }));
+  info.appendChild(ol);
+  info.appendChild(h("div", { "class": "rf-shsec" }, h("span", { text: "Last lines from the chat" })));
+  info.appendChild(h("pre", { "class": "rf-ctx", "data-k": "rf-ctx", text: d.context.length ? d.context.join("\n") : "No chat lines for this one." }));
+  if (away) { // Away prompts: nothing the model wrote sits above Allow once / Deny. The exact request comes first; the Mac's rule text and the chat lines come after the buttons.
+    var ap = rfPermItem(d, rfPendItems());
+    if (!ap || ap.kind === "question") { // (a permission shows its exact command in the answer box, right above Allow once)
+      f.appendChild(h("div", { "class": "rf-shsec" }, h("span", { text: ap ? "The exact question" : "The request (no longer on the Mac)" })));
+      f.appendChild(h("pre", { "class": "rf-ctx rf-cmd", "data-k": "rf-exact", text: ap ? ap.question : d.ask }));
+    }
+  } else f.appendChild(info);
+  f.appendChild(h("div", { "class": "rf-shsec", id: "rf-answer-h" }, h("span", { text: "Your answer" })));
+  f.appendChild(rfAnswerBox(d));
+  if (away) { f.appendChild(h("div", { "class": "rf-shsec" }, h("span", { text: "The Mac’s rule" }))); f.appendChild(info); }
+  f.appendChild(rfAskBlock(d.id, RF_DEC_ASKS, asks, pend, function (q) { rfAsk(d, q); }));
+  f.appendChild(h("div", { "class": "rf-shsec" }, h("span", { text: "More options" })));
+  var m = rfDoit(d), chatOk = !!(d.sessionId && S.byId && S.byId[d.sessionId]);
+  f.appendChild(rfOpt("Answer now", "", { k: "rf-o-answer", on: function () { var el = document.querySelector("#decHost [data-ans] input, #decHost [data-ans] textarea, #decHost [data-ans] button"); if (el) { el.scrollIntoView({ block: "center" }); el.focus(); } } }));
+  f.appendChild(rfOpt("Ask a question", "", { k: "rf-o-ask", on: function () { var el = document.querySelector("#decHost [data-ask]"); if (el) { el.scrollIntoView({ block: "center" }); el.focus(); } } }));
+  f.appendChild(rfOpt("Do it for me", m.sub, { k: "rf-o-doit", on: function () {
+    if (m.mode === "no") { toast("Claude can’t do this one for you."); return; }
+    if (m.mode === "gated") { S.rf.gate = d.id; renderDec(); return; }
+    rfDoGo(d);
+  } }));
+  f.appendChild(rfOpt("Snooze…", "1 hour, tonight or tomorrow", { k: "rf-o-snooze", on: function () { S.rf.snz = !S.rf.snz; renderDec(); } }));
+  if (S.rf.snz) f.appendChild(h("div", { "class": "rf-snz" }, rfBtn("1 hour", { k: "rf-snz-hour", on: function () { rfSnooze(d, "hour"); } }), rfBtn("Tonight", { k: "rf-snz-tonight", on: function () { rfSnooze(d, "tonight"); } }), rfBtn("Tomorrow", { k: "rf-snz-tomorrow", on: function () { rfSnooze(d, "tomorrow"); } })));
+  f.appendChild(rfOpt("Not doing (archive)", "", { cls: "bad", k: "rf-o-dismiss", on: function () { rfDismiss(d); } }));
+  f.appendChild(rfOpt("Open full chat", chatOk ? d.project : "No chat for this one", { k: "rf-o-chat", disabled: !chatOk, on: function () { var sid = d.sessionId; rfCloseSheet(true); openFocus(sid); } }));
+  return f;
+}
+function rfJobAnswer(j, q) {
+  var l = str(q).toLowerCase(), st = rfJobStats(j);
+  if (/skip|leave out/.test(l)) return "A skipped task does not run. It stays on the list, so you can restore it later.";
+  if (/safe|undo|delete|risk/.test(l)) return "A task only runs once it shows Approved, and you can skip any of them. Nothing you tap here deletes anything.";
+  if (/long|time|when/.test(l)) return "About " + rfMins(st.mins) + " in total" + (j.schedule ? ". " + j.schedule + "." : ".");
+  return j.name + " has " + plural(st.n, "task", "tasks") + ", " + st.yes + " of them waiting for a yes." + (j.summary ? " " + j.summary : "");
+}
+async function rfTaskOp(j, kind, ids) {
+  var cur = rfJobsNow().filter(function (x) { return x.id === j.id; })[0]; // the Mac's list as it is NOW; the tap acts only on the tasks as they were shown
+  var same = cur && ids.every(function (id) { var a = j.tasks.filter(function (t) { return t.id === id; })[0], b = cur.tasks.filter(function (t) { return t.id === id; })[0]; return a && b && a.textRaw === b.textRaw; });
+  if (!same) { toast("That task changed on the Mac. Check it again."); render(true); renderDec(); return; }
+  var hashes = null;
+  try { hashes = await rfTaskHashes(cur, ids, function (b) { return crypto.subtle.digest("SHA-256", b); }); } catch (e) { hashes = null; }
+  var f = rfJobFields(kind, cur, ids, cur.machine, hashes); if (!f) { toast("That looks wrong, so nothing was sent."); return; }
+  var to = kind === "skip" ? "skipped" : kind === "restore" ? "needs-yes" : "approved", now = Date.now();
+  ids.forEach(function (id) { S.rf.overlay[j.id + ":" + id] = { status: to, at: now }; });
+  render(true); renderDec();
+  rfSend(f, { onFail: function () { ids.forEach(function (id) { delete S.rf.overlay[j.id + ":" + id]; }); render(true); renderDec(); } }).then(function (rid) {
+    if (!rid) { ids.forEach(function (id) { delete S.rf.overlay[j.id + ":" + id]; }); render(true); renderDec(); return; }
+    toast(kind === "skip" ? "Skipped for tonight" : kind === "restore" ? "Back to Needs a yes" : ids.length > 1 ? "Approved " + ids.length + " tasks" : "Approved");
+  });
+}
+function rfJobBody(j) {
+  var f = document.createDocumentFragment(), st = rfJobStats(j), ro = j.status === "done" || j.status === "running", asks = S.rf.jobAsks[j.id] || [];
+  f.appendChild(h("h3", { "class": "rf-title", id: "rf-title", tabindex: "-1", text: j.name }));
+  if (j.schedule) f.appendChild(h("div", { "class": "rf-tiny", text: j.schedule }));
+  f.appendChild(h("div", { "class": "rf-jsum", "data-k": "rf-jsum" }, h("b", { text: plural(st.n, "task", "tasks") }), " · about " + rfMins(st.mins) + " · " + (st.yes ? st.yes + " need a yes" : "nothing needs a yes")));
+  f.appendChild(h("div", { "class": "rf-shsec" }, h("span", { text: "Tasks tonight" })));
+  var list = h("div", { "class": "rf-tasks" });
+  j.tasks.forEach(function (t) {
+    var acts = h("div", { "class": "rf-tacts" });
+    if (!ro && t.status !== "done" && t.status !== "running") {
+      if (t.status === "needs-yes") acts.appendChild(rfBtn("Approve", { cls: "pri sm", k: "rf-approve-" + t.id, label: "Approve: " + t.text, on: function () { rfTaskOp(j, "approve", [t.id]); } }));
+      if (t.status === "skipped") acts.appendChild(rfBtn("Restore", { cls: "sm", k: "rf-restore-" + t.id, label: "Restore: " + t.text, on: function () { rfTaskOp(j, "restore", [t.id]); } }));
+      else acts.appendChild(rfBtn("Skip", { cls: "sm", k: "rf-skip-" + t.id, label: "Skip: " + t.text, on: function () { rfTaskOp(j, "skip", [t.id]); } }));
+    }
+    list.appendChild(h("div", { "class": "rf-trow" }, h("div", { "class": "rf-ttxt" }, h("div", { "class": "rf-tt", text: t.text }), h("div", { "class": "rf-tmeta" }, rfChip(RF_TASK_WORD[t.status], "t-" + t.status), h("span", { text: t.minutes ? "about " + rfMins(t.minutes) : "instant" }))), acts));
+  });
+  if (!j.tasks.length) list.appendChild(h("div", { "class": "rf-note", text: "No task list for this job yet." }));
+  f.appendChild(list);
+  var ids = j.tasks.filter(function (t) { return t.status === "needs-yes"; }).map(function (t) { return t.id; });
+  var acts = h("div", { "class": "rf-acts" });
+  if (!ro) acts.appendChild(rfBtn("Approve all" + (ids.length ? " (" + ids.length + ")" : ""), { cls: "pri", k: "rf-approveall", disabled: !ids.length, on: function () { rfTaskOp(j, "approve", ids); } }));
+  acts.appendChild(rfBtn("Ask about this", { k: "rf-j-ask", on: function () { var el = document.querySelector("#decHost [data-ask]"); if (el) { el.scrollIntoView({ block: "center" }); el.focus(); } } }));
+  f.appendChild(acts);
+  f.appendChild(rfAskBlock("job-" + j.id, RF_JOB_ASKS, asks, null, function (q) {
+    var t = str(q).trim(); if (!t) return; (S.rf.jobAsks[j.id] = S.rf.jobAsks[j.id] || []).push({ q: t.slice(0, 300), a: rfJobAnswer(j, t) }); S.rf.vals["ask:job-" + j.id] = ""; renderDec();
+  }));
+  return f;
+}
+function rfJobsNow(model) { return rfJobView(rfData().jobs, S.rf.overlay, Date.now()); }
+function renderDec() {
+  var host = $("decHost"); if (!host) return;
+  var sh = S.rf.sheet, d = sh && sh.type === "dec" ? rfDec(sh.id) : null, j = sh && sh.type === "job" ? rfJobsNow().filter(function (x) { return x.id === sh.id; })[0] : null;
+  if (sh && !d && !j) { S.rf.sheet = null; sh = null; }
+  if (!sh || (!d && !j)) { if (host.firstChild) { clear(host); host.removeAttribute("data-key"); if (!S.qa.open && !S.focus) setInert(false); } return; }
+  var key = JSON.stringify([sh.type, sh.id, d ? [d.ask, d.what, d.why, d.kind, d.context, d.options, d.steps, d.gate, d.canDoIt, d.sessionId && !!S.byId[d.sessionId]] : j && [j.name, j.status, j.tasks], S.rf.snz, S.rf.confirm, S.rf.gate, S.rf.gateAns, S.rf.gateSel[sh.id], !!S.rf.gateBusy, S.rf.checks[sh.id], d ? [(rfData().asks[d.id] || []).length, !!rfAskWaiting(d.id), d.kind === "permission" || d.inputHash ? !!rfPermItem(d, rfPendItems()) : 0] : (S.rf.jobAsks[sh.id] || []).length]);
+  if (host.getAttribute("data-key") === key) { setInert(true); return; }
+  var opening = !host.firstChild, ae = document.activeElement, keepK = !opening && ae && host.contains(ae) ? ae.getAttribute("data-k") : "", ss = keepK && ae.selectionStart, se = keepK && ae.selectionEnd;
+  var oldBody = host.querySelector(".rf-body2"), oldTop = oldBody ? oldBody.scrollTop : 0;
+  host.setAttribute("data-key", key); clear(host);
+  var grab = h("div", { "class": "rf-grab", "aria-hidden": "true" }, h("i")), body = h("div", { "class": "rf-body2" }, d ? rfDecBody(d) : rfJobBody(j));
+  var sheet = h("section", { "class": "rf-sheet", role: "dialog", "aria-modal": "true", "aria-label": d ? "Decision: " + d.ask : "Job: " + j.name },
+    grab, h("div", { "class": "rf-shtop" }, h("span", { "class": "rf-sp" }), h("button", { "class": "rf-link", type: "button", "data-k": "rf-close", onclick: function () { rfCloseSheet(false); }, text: "Close" })), body);
+  sheet.addEventListener("keydown", function (e) { if (e.key === "Escape") { e.stopPropagation(); rfCloseSheet(false); } else trapTab(e, sheet); });
+  rfGrab(grab, sheet);
+  host.appendChild(h("button", { "class": "rf-scrim", type: "button", "aria-hidden": "true", tabindex: "-1", onclick: function () { rfCloseSheet(false); } }));
+  host.appendChild(sheet);
+  setInert(true);
+  body.scrollTop = oldTop;
+  if (opening) { var t = $("rf-title"); if (t) t.focus(); return; }
+  var tgt = keepK ? host.querySelector('[data-k="' + cssEsc(keepK) + '"]') : null;
+  if (tgt && !tgt.disabled) { tgt.focus(); try { if (ss != null) tgt.setSelectionRange(ss, se); } catch (e) {} }
+}
+function rfGrab(grab, sheet) { // swipe down on the grab bar to close; pointer capture means a finger-up outside still ends it
+  var d = null;
+  grab.addEventListener("pointerdown", function (e) { d = { y: e.clientY, pid: e.pointerId, dy: 0 }; try { grab.setPointerCapture(e.pointerId); } catch (x) {} });
+  grab.addEventListener("pointermove", function (e) { if (!d || e.pointerId !== d.pid) return; d.dy = Math.max(0, e.clientY - d.y); sheet.style.transform = "translateY(" + d.dy + "px)"; });
+  function end(e, cancelled) { if (!d || e.pointerId !== d.pid) return; var dy = d.dy; d = null; sheet.style.transform = ""; try { grab.releasePointerCapture(e.pointerId); } catch (x) {} if (!cancelled && dy > 96) rfCloseSheet(false); }
+  grab.addEventListener("pointerup", function (e) { end(e, false); });
+  grab.addEventListener("pointercancel", function (e) { end(e, true); });
+  grab.addEventListener("lostpointercapture", function (e) { end(e, true); });
+}
+/* ----- Autopilot tab ----- */
+function rfJobRow(j) {
+  var act = RF_JOB_ACTION[j.status], st = rfJobStats(j);
+  var open = function (e) { S.rf.sheet = { type: "job", id: j.id }; S.rf.opener = e.currentTarget; renderDec(); };
+  var meta = h("button", { "class": "rf-jmeta", type: "button", "data-k": "rf-job-" + j.id, "aria-label": "Open " + j.name + " details", onclick: open },
+    h("div", { "class": "rf-proj", text: j.name }), h("div", { "class": "rf-q", text: j.schedule }), h("div", { "class": "rf-tiny", text: plural(st.n, "task", "tasks") + (st.yes ? " · " + st.yes + " need a yes" : "") + (j.summary ? ". " + j.summary : "") }),
+    j.status === "running" && j.progress !== null ? h("div", { "class": "rf-pbar", role: "progressbar", "aria-label": "Progress", "aria-valuemin": "0", "aria-valuemax": "100", "aria-valuenow": String(j.progress) }, h("i", { style: "width:" + j.progress + "%" })) : null);
+  var btn = null;
+  if (j.status === "needs-yes") btn = rfBtn(act, { cls: "pri sm", k: "rf-jact-" + j.id, label: act + ": " + j.name, on: open });
+  else if (j.status === "approved") btn = rfBtn(act, { cls: "sm", k: "rf-jact-" + j.id, label: act + ": " + j.name, on: open });
+  else if (j.status === "running" || j.status === "paused") btn = rfBtn(act, { cls: j.status === "running" ? "bad sm" : "sm", k: "rf-jact-" + j.id, label: act + ": " + j.name, on: function () { toast(j.status === "running" ? "Stopping a job from the phone comes with the runner (phase 2)." : "Resuming a job from the phone comes with the runner (phase 2)."); } });
+  return h("div", { "class": "rf-row rf-job s-" + j.status }, meta, btn);
+}
+function autopilotRfNode(model) {
+  var f = document.createDocumentFragment(), R = rfData();
+  if (!model.loaded) return emptyBox("Connecting…", "Waiting for your computers to report in.");
+  if (!R.known) return emptyBox("Autopilot needs a Mac update", "Your Mac isn’t sending its jobs yet. Update Mission Control on the Mac, then reopen this.");
+  var jobs = rfJobsNow(model);
+  if (!jobs.length) f.appendChild(h("div", { "class": "rf-empty", "data-k": "rf-nojobs" }, h("b", { text: "No jobs yet." }), h("span", { text: " Scheduled tasks and the overnight run show up here." })));
+  RF_JOB_GROUPS.forEach(function (g) {
+    var js = jobs.filter(function (j) { return j.status === g[0]; }); if (!js.length) return;
+    f.appendChild(h("div", { "class": "rf-sec js-" + g[0], "data-k": "rf-jgrp-" + g[0] }, h("span", { text: g[1] }), h("span", { text: String(js.length) })));
+    var grp = h("div", { "class": "rf-grp" }); js.forEach(function (j) { grp.appendChild(rfJobRow(j)); }); f.appendChild(grp);
+  });
+  f.appendChild(h("button", { "class": "rf-link rf-blk", type: "button", "data-k": "rf-overnight", onclick: function () { setTab("overnight"); }, text: "Overnight run and agents ›" }));
+  return f;
+}
+/* ----- Sessions tab: the card stack ----- */
+function rfStackTidy(model, s) { var m = model.mstat[s.machine]; return m && m.tidy ? m.tidy : cleanTidy(null); }
+function rfMove(model, s, areaId) {
+  var st = S.rf.stack, areas = rfAreas(model), f = rfMoveFields(s, areaId, areas, s.machine);
+  if (!f) { toast("That move looks wrong, so nothing was sent."); return; }
+  if (st.busy[s.id]) return; st.busy[s.id] = true; st.seen[s.id] = true;
+  var from = rfAreaOf(s), to = areas.filter(function (a) { return a.id === areaId; })[0], title = s.title, items = f.items;
+  render(true);
+  rfSend(f, { onDone: function (r) {
+    var res = tidyResult(r, items), it = res.items[s.id];
+    delete st.busy[s.id];
+    if (res.known && it && !it.ok) { delete st.seen[s.id]; st.last = null; toast("“" + title.slice(0, 40) + "” wasn’t moved: " + archiveSkipWord(it.why) + "."); return; }
+    st.last = { sid: s.id, from: from, to: areaId, applyId: res.applyId, state: "done", title: title, target: s.machine };
+    toast("Moved “" + title.slice(0, 40) + "” to " + (to ? to.name : areaId), res.applyId ? { undo: function () { rfUndoMove(); }, ms: RF_HOLD_MS } : undefined);
+  }, onFail: function () { delete st.busy[s.id]; delete st.seen[s.id]; } }).then(function (rid) { if (!rid) { delete st.busy[s.id]; delete st.seen[s.id]; render(true); } });
+}
+function rfUndoMove() {
+  var st = S.rf.stack, l = st.last; if (!l || !l.applyId || l.state !== "done") return;
+  var f = tidyUndoFields(l.applyId, l.target); l.state = "undoing"; render(true);
+  rfSend(f, { onDone: function () { delete st.seen[l.sid]; st.last = null; toast("Moved back"); }, onFail: function () { if (st.last === l) l.state = "done"; } });
+}
+function sessionsStackNode(model) {
+  var f = document.createDocumentFragment(), st = S.rf.stack;
+  if (!model.loaded) return emptyBox("Connecting…", "Waiting for your computers to report in.");
+  var areas = rfAreas(model), all = st.all, cands = rfStackList(uniq(model), all), unseen = cands.filter(function (s) { return !st.seen[s.id]; });
+  if (cands.length && !unseen.length) { st.seen = Object.create(null); unseen = cands.slice(); } // every card skipped: start the pass again
+  var more = rfBtn(all ? "Only unsorted" : "Review sorted chats too", { cls: "link", k: "rf-stackall", on: function () { st.all = !st.all; st.seen = Object.create(null); render(true); } });
+  if (!cands.length) {
+    f.appendChild(h("div", { "class": "rf-empty col", "data-k": "rf-stack-empty" }, h("b", { text: "Unsorted is empty." }), h("span", { text: "Every chat has a home." })));
+    f.appendChild(more);
+  } else {
+    var s = unseen[0], cur = areas.filter(function (a) { return a.id === rfAreaOf(s); })[0], curName = cur ? cur.name : (s.areaName || s.group || "Unsorted"), sg = rfSuggest(s, rfStackTidy(model, s), areas);
+    f.appendChild(h("div", { "class": "rf-tiny rf-count", "data-k": "rf-count", text: rfStackCount(cands.length - unseen.length + 1, cands.length, all) }));
+    var card = h("div", { "class": "rf-card a" + rfTone(rfAreaOf(s)), "data-k": "rf-card" });
+    card.appendChild(h("div", { "class": "rf-tiny", text: "Currently in " + curName }));
+    card.appendChild(h("h3", { "class": "rf-ctitle", text: s.title }));
+    card.appendChild(h("div", { "class": "rf-q", "data-k": "rf-sugg", text: sg ? "Claude suggests " + sg.name + ": " + sg.reason + "." : "No suggestion. Your call." }));
+    var grid = h("div", { "class": "rf-grid" });
+    areas.filter(function (a) { return a.id !== rfAreaOf(s); }).forEach(function (a) {
+      var on = sg && sg.areaId === a.id;
+      grid.appendChild(h("button", { "class": "rf-abtn a" + rfTone(a.id) + (on ? " sg" : ""), type: "button", "data-k": "rf-to-" + a.id, onclick: function () { rfMove(model, s, a.id); } }, h("span", { "class": "rf-dot a" + rfTone(a.id), "aria-hidden": "true" }), h("span", { "class": "rf-atext" }, a.name, on ? h("em", { text: "SUGGESTED" }) : null)));
+    });
+    card.appendChild(grid);
+    card.appendChild(h("div", { "class": "rf-cardfoot" }, rfBtn("Skip for now", { k: "rf-skip", on: function () { st.seen[s.id] = true; render(true); } }),
+      rfBtn("Undo last move", { cls: "link", k: "rf-undomove", disabled: !(st.last && st.last.applyId && st.last.state === "done"), on: rfUndoMove })));
+    f.appendChild(h("div", { "class": "rf-stackwrap" }, card));
+    f.appendChild(more);
+  }
+  f.appendChild(h("button", { "class": "rf-link rf-blk", type: "button", "data-k": "rf-browse", onclick: function () { S.rf.sessMode = "browse"; render(true); window.scrollTo(0, 0); }, text: "Browse all chats ›" }));
+  return f;
+}
+/* ----- Saves, restyled (same data and actions as before) ----- */
+function rfSaveState(it) { return S.rf.saveSt[it.id] || null; }
+function rfSkillsReady() {
+  var out = [];
+  NAMES.forEach(function (n) { var m = S.machines[n]; if (m && Array.isArray(m.skills) && sigOk("machines/" + n)) m.skills.slice(0, 30).forEach(function (x) { var t = str(x); if (/^[a-z0-9-]{1,40}$/.test(t) && out.indexOf(t) < 0) out.push(t); }); });
+  return out;
+}
+function rfStepper(it) {
+  var s = rfSaveState(it), fin = s && s.out === "Task" ? "Task added" : s && s.out === "KB note" ? "Note ready" : "Skill ready";
+  return h("div", { "class": "rf-stepper", "data-k": "rf-stepper" }, h("span", { "class": "on", text: "SAVED" }), h("span", { "class": s ? "on" : "", text: "LEARNING" }), h("span", { "class": s && s.done ? "fin" : "", text: fin.toUpperCase() }));
+}
+function rfSavePrompt(out) { return out === "KB note" ? "Write a short note for my knowledge base about this saved post: what it says and what is worth keeping." : "Turn this saved post into one small task for me, with a first step."; }
+function rfSaveMark(it, out) { S.rf.saveSt[it.id] = { out: out, at: Date.now(), done: false }; lsSet("mc-save-st-v1", JSON.stringify(S.rf.saveSt)); render(true); }
+function rfSaveStart(it, out) { if (out === "Skill") openStart("skill-install", it, "", "", out); else openStart("plain", it, "", rfSavePrompt(out), out); }
+function rfSaveRow(it, model, verified) {
+  var ty = rfSaveType(it), gate = verified ? startGate(model.mstat) : { ok: false, target: "", reason: "unverified data" }, open = !!(S.saveOpen && S.saveOpen[it.id]);
+  var tile = { yt: "YT", tt: "TT", bl: "BLOG", gh: "GH", x: "X" }[ty];
+  var top = h("div", { "class": "rf-sv" }, h("div", { "class": "rf-svtop" }, h("span", { "class": "rf-ty t-" + ty, "aria-hidden": "true", text: tile }),
+    h("div", { "class": "rf-grow" }, h("div", { "class": "rf-svtt", text: it.title }), h("div", { "class": "rf-tiny", text: (it.handle ? "@" + it.handle.replace(/^@/, "") : "") + (it.handle && it.date ? " · " : "") + it.date }))));
+  top.appendChild(rfStepper(it));
+  var acts = h("div", { "class": "rf-sacts" });
+  [["Make skill", "Skill", "pri"], ["KB note", "KB note", ""], ["Task", "Task", ""]].forEach(function (a) {
+    acts.appendChild(rfBtn(a[0], { cls: a[2] + " sm", k: "rf-save-" + a[1].replace(" ", "-").toLowerCase(), disabled: !gate.ok, title: gate.ok ? null : gate.reason, on: function () { rfSaveStart(it, a[1]); } }));
+  });
+  acts.appendChild(rfBtn(open ? "Less" : "More", { cls: "link sm", k: "rf-save-more", on: function () { if (!S.saveOpen || typeof S.saveOpen !== "object") S.saveOpen = Object.create(null); if (S.saveOpen[it.id]) delete S.saveOpen[it.id]; else S.saveOpen[it.id] = true; render(true); } }));
+  top.appendChild(acts);
+  if (!gate.ok) top.appendChild(h("div", { "class": "rf-tiny rf-gatewhy", text: "Starting is off: " + gate.reason }));
+  if (open) { var body = saveRow(it, model, verified); top.appendChild(h("div", { "class": "rf-more" }, body.querySelector(".sbody") || document.createDocumentFragment())); }
+  return top;
+}
+function rfSavesNode(model) {
+  var p = savesPick(), wrap = h("div", { "class": "rf-saves" }), skills = rfSkillsReady();
+  if (S.dbState === "none") return emptyBox("Can’t connect", "This browser can’t open a live connection to Mission Control.");
+  var age = p.doc ? S.now - p.doc.at : NaN, stale = p.doc && (!isFinite(age) || age > SAVES_STALE_MS);
+  if (p.doc) wrap.appendChild(h("div", { id: "savesUpd", "class": "supd" + (stale ? " stale" : ""), text: (stale ? "⏱ " : "") + "updated " + ago(p.doc.at) + (stale ? " · may be out of date" : "") }));
+  if (p.doc && !p.verified) wrap.appendChild(h("div", { "class": "banner", role: "status", style: "margin:0", text: "Unverified: these saves aren’t proven to come from your Mac (" + unverifiedReason(docVerdict("saves/" + p.name)) + "). Links and actions are off." }));
+  if (skills.length) { wrap.appendChild(rfSec("Skills ready", skills.length)); var sk = h("div", { "class": "rf-skills", "data-k": "rf-skills" }); skills.forEach(function (n) { sk.appendChild(h("span", { "class": "rf-skill", text: n })); }); wrap.appendChild(sk); }
+  wrap.appendChild(rfSec("Saved links"));
+  var fw = h("div", { "class": "rf-filters", role: "group", "aria-label": "Filter by type" });
+  RF_SAVE_TYPES.forEach(function (t) { fw.appendChild(h("button", { "class": "rf-fchip", type: "button", "data-k": "rf-sf-" + t[0], "aria-pressed": String(S.rf.saveFilter === t[0]), onclick: function () { S.rf.saveFilter = t[0]; render(true); }, text: t[1] })); });
+  wrap.appendChild(fw);
+  if (p.state === "ok") {
+    var list = p.doc.items.filter(function (it) { return S.rf.saveFilter === "all" || rfSaveType(it) === S.rf.saveFilter; });
+    if (list.length) { var grp = h("div", { "class": "rf-grp" }); list.forEach(function (it) { grp.appendChild(rfSaveRow(it, model, p.verified)); }); wrap.appendChild(grp); }
+    else wrap.appendChild(h("p", { "class": "rf-note", text: p.doc.items.length ? "Nothing saved of this type." : "No saves this month." }));
+  } else wrap.appendChild(h("p", { "class": "rf-note", text: p.state === "unavailable" ? "Couldn’t read saves on the " + p.name : (p.state === "nodata" && S.saves.Mac === undefined && S.saves.PC === undefined && S.dbState === "ok" ? "Loading…" : "No saves this month.") }));
+  return wrap;
+}
+/* ----- notifications (4g): one tap in the menu, signed push-subscribe ----- */
+function rfPushSupported() { return typeof navigator !== "undefined" && "serviceWorker" in navigator && typeof window !== "undefined" && "PushManager" in window && "Notification" in window; }
+function rfPushRead() {
+  var o = { ios: isIosUa(navigator.userAgent || "", navigator.platform || "", navigator.maxTouchPoints | 0), standalone: isStandalone(), supported: rfPushSupported(), permission: "default", subscribed: !!S.rf.push.sub };
+  try { if (o.supported) o.permission = Notification.permission; } catch (e) {}
+  return o;
+}
+function rfPushRefresh() {
+  if (!rfPushSupported()) return;
+  rfSwReady().then(function (reg) { return reg.pushManager.getSubscription(); }).then(function (sub) { var had = !!S.rf.push.sub; S.rf.push.sub = sub; if (had !== !!sub) { renderMenu(); } }).catch(function () {});
+}
+function rfSwReady() { return Promise.race([navigator.serviceWorker.ready, new Promise(function (_, rej) { setTimeout(function () { rej(new Error("sw")); }, 8000); })]); }
+function rfPushPrefs() { try { rfSwReady().then(function (reg) { if (reg.active) reg.active.postMessage({ type: "push-prefs", showNames: S.rf.showNames === true }); }); } catch (e) {} }
+function rfPushOn() {
+  var R = rfData(), key = R.push.vapidKey, tgt = R.push.machine;
+  var state = rfPushState(rfPushRead());
+  if (state !== "off") { toast(rfPushText(state, NaN, Date.now())); return; }
+  if (!key || !tgt) { toast("Notifications aren’t set up on the Mac yet."); return; }
+  var bytes; try { bytes = b64urlDecode(key); } catch (e) { bytes = null; }
+  if (!bytes || bytes.length !== 65 || bytes[0] !== 4) { toast("The Mac’s notification key looks wrong."); return; }
+  if (S.rf.push.busy) return; S.rf.push.busy = true; renderMenu();
+  var perm = Notification.requestPermission(); // first thing in the tap: iOS only asks for permission from a user gesture
+  Promise.resolve(perm).then(function (p) {
+    if (p !== "granted") throw new Error("denied");
+    return rfSwReady();
+  }).then(function (reg) { return reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: bytes }); })
+    .then(function (sub) {
+      var j = sub.toJSON(), f = rfPushSubFields({ endpoint: j.endpoint, p256dh: j.keys && j.keys.p256dh, auth: j.keys && j.keys.auth }, tgt);
+      S.rf.push.sub = sub;
+      if (!f) { sub.unsubscribe().catch(function () {}); S.rf.push.sub = null; throw new Error("endpoint"); }
+      rfPushPrefs();
+      return rfSend(f, { onDone: function () { toast("Notifications on"); renderMenu(); }, onFail: function () { try { sub.unsubscribe(); } catch (e) {} S.rf.push.sub = null; renderMenu(); } });
+    })
+    .catch(function (e) {
+      var m = e && e.message;
+      toast(m === "denied" ? "Notifications weren’t allowed. You can change that in Settings." : m === "endpoint" ? "That notification address isn’t allowed." : "Couldn’t turn notifications on.");
+    })
+    .then(function () { S.rf.push.busy = false; renderMenu(); });
+}
+function rfPushOff() {
+  var R = rfData(), tgt = R.push.machine || (S.rfd && NAMES.filter(function (n) { return S.model && S.model.mstat[n].youPaired; })[0]);
+  var f = rfPushUnsubFields(tgt), sub = S.rf.push.sub;
+  if (S.rf.push.busy) return; S.rf.push.busy = true; renderMenu();
+  var drop = sub ? sub.unsubscribe().catch(function () {}) : Promise.resolve();
+  drop.then(function () { S.rf.push.sub = null; if (!f) return false; return rfSend(f, { onDone: function () { toast("Notifications off"); } }); })
+    .then(function () { S.rf.push.busy = false; if (!f) toast("Notifications off on this phone. Turn them off on the Mac too."); renderMenu(); });
+}
+function rfPushRow() {
+  var o = rfPushRead(), st = rfPushState(o), R = rfData(), mine = R.push.on[DEV.deviceId], f = document.createDocumentFragment();
+  var label = rfPushText(st, mine ? mine.lastAlertAt : NaN, Date.now());
+  var row = h("div", { "class": "mgroup rf-notif", "data-k": "mi-notif" }, h("div", { "class": "cap", "data-k": "rf-notif-text", text: label }));
+  if (st === "off") row.appendChild(h("button", { "class": "btn", type: "button", "data-k": "rf-notif-on", disabled: S.rf.push.busy ? "" : null, onclick: rfPushOn, text: S.rf.push.busy ? "Turning on…" : "Turn on" }));
+  if (st === "on") {
+    row.appendChild(h("button", { "class": "btn", type: "button", "data-k": "rf-notif-off", disabled: S.rf.push.busy ? "" : null, onclick: rfPushOff, text: "Turn off" }));
+    var cb = h("input", { type: "checkbox", "data-k": "rf-shownames", "aria-label": "Show project names on the lock screen" }); cb.checked = S.rf.showNames === true;
+    cb.addEventListener("change", function () { S.rf.showNames = cb.checked; lsSet("mc-rf-names", cb.checked ? "1" : "0"); rfPushPrefs(); });
+    row.appendChild(h("label", { "class": "rf-cb" }, cb, h("span", { text: "Show project names on the lock screen" })));
+  }
+  return row;
+}
+/* ----- deep link #d=<id>, badge ----- */
+function rfDeepLink() {
+  var id = S.rf.deep; if (!id || !S.model || !S.model.loaded || !rfData().known) return;
+  S.rf.deep = ""; try { history.replaceState(null, "", location.pathname + location.search); } catch (e) {}
+  var d = rfPendNow().filter(function (x) { return x.id === id; })[0];
+  if (S.rf.sheet) rfCloseSheet(true); // an old sheet never stays over the one the alert named
+  setTab("decide");
+  if (d) rfOpenDec(d.id, null); else toast("Already answered");
+}
+function rfDeepSet(id) { if (/^[0-9a-f]{32}$/.test(str(id))) { S.rf.deep = id; rfDeepLink(); } }
+function rfBadgeSync() {
+  var n = rfBadgeCount(S.rfd && S.rfd.known ? rfPendNow().length : 0);
+  if (S.rf.badge === n) return; S.rf.badge = n;
+  try { if (n && navigator.setAppBadge) navigator.setAppBadge(n).catch(function () {}); else if (!n && navigator.clearAppBadge) navigator.clearAppBadge().catch(function () {}); } catch (e) {}
+}
+function rfInit() {
+  S.rf.order = lsGet("mc-rf-order") === "area" ? "area" : "effort";
+  S.rf.showNames = lsGet("mc-rf-names") === "1";
+  try { var st = JSON.parse(lsGet("mc-save-st-v1") || "{}"); if (st && typeof st === "object") S.rf.saveSt = st; } catch (e) {}
+  var id = rfParseHash(location.hash); if (id) S.rf.deep = id;
+  window.addEventListener("hashchange", function () { var x = rfParseHash(location.hash); if (x) rfDeepSet(x); });
+  try { navigator.serviceWorker.addEventListener("message", function (e) { var d = e.data; if (d && d.type === "open-decision") rfDeepSet(d.id); }); } catch (e) {}
+  window.addEventListener("pagehide", rfFlush);
+  document.addEventListener("visibilitychange", function () { if (document.visibilityState === "hidden") rfFlush(); else { rfPushRefresh(); rfBadgeSync(); } });
+  rfPushRefresh(); rfPushPrefs();
+}
+/* @refocus-ui-end */
 function renderDialog() {
   var host = $("dlgHost");
   var key = S.ask ? S.ask.title + "|" + S.ask.body : "";
@@ -5100,6 +6223,7 @@ function init() {
   function autoRefresh(gap) { if (S.db && document.visibilityState !== "hidden" && Date.now() - S.lastRefreshAt > gap) doRefresh(true); }
   function markSeen() { lsSet("mc-last-seen", String(Date.now())); }
   function checkAway() { var last = Number(lsGet("mc-last-seen")); S.awaySince = isFinite(last) && last > 0 && Date.now() - last >= AWAY_MS ? last : 0; markSeen(); }
+  rfInit();
   checkAway(); setInterval(function () { if (document.visibilityState !== "hidden") markSeen(); }, 60000);
   window.addEventListener("pagehide", markSeen);
   document.addEventListener("visibilitychange", function () { if (document.visibilityState === "hidden") markSeen(); else { checkAway(); render(true); } });
