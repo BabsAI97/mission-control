@@ -848,6 +848,33 @@ body.sheet-lock{position:fixed;left:0;right:0;width:100%;overflow:hidden}
 .fsheet.cv .fcomp .cap{margin-top:6px}
 @media (prefers-reduced-motion: reduce){.sk i{animation:none}}
 /* @cv-css-end */
+/* v0.13 decision sweep (Decide as cards, to-dos, finished) */
+.rf-sumline{font-size:15px;line-height:21px;font-weight:600;color:var(--text2);margin:14px 4px 12px}
+.rf-chk{width:100%;min-height:48px;border-radius:14px;border:2px solid var(--accent);background:transparent;color:var(--accentText);font:inherit;font-size:17px;font-weight:600;margin-bottom:8px;cursor:pointer}
+.rf-chk:disabled{opacity:.6;cursor:default}
+.rf-card{background:var(--waitBg);border:1.5px solid var(--waitLine);border-radius:16px;padding:12px 14px;margin-bottom:12px}
+.rf-ck{font-size:12px;line-height:16px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--waitTx)}
+.rf-cq{font-size:19px;line-height:25px;font-weight:700;margin-top:2px;overflow-wrap:anywhere}
+.rf-cpills{display:flex;flex-direction:column;gap:8px;margin-top:10px}
+.rf-cpill{display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%;min-height:50px;padding:10px 16px;border-radius:25px;border:1.5px solid var(--accent);background:var(--bg);color:var(--accentText);font:inherit;font-size:16px;font-weight:600;line-height:21px;text-align:left;cursor:pointer;overflow-wrap:anywhere}
+.rf-cpill[aria-checked="true"]{background:var(--accent);color:#fff}
+.rf-tag{font-size:11px;line-height:16px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;padding:1px 7px;border-radius:10px;background:var(--accentSoft);color:var(--accentText);white-space:nowrap;flex:none}
+.rf-cpill[aria-checked="true"] .rf-tag{background:rgba(255,255,255,.25);color:#fff}
+.rf-cdesc{font-size:14px;line-height:19px;color:var(--text2);margin:-2px 6px 2px 16px;padding-left:10px;border-left:2px solid var(--accent)}
+.rf-oth{width:100%;min-height:44px;border:1px solid var(--line2);border-radius:12px;background:var(--bg);color:var(--text);padding:0 12px;font:inherit;font-size:16px}
+.rf-csend{width:100%;min-height:50px;margin-top:12px;border:0;border-radius:14px;background:var(--accent);color:#fff;font:inherit;font-size:17px;font-weight:600;cursor:pointer}
+.rf-csend:disabled{opacity:.4;cursor:default}
+.rf-todo{display:flex;align-items:center;gap:10px;width:100%;min-height:56px;padding:8px 16px;border:0;background:var(--fill);color:var(--text);font:inherit;text-align:left;cursor:pointer}
+.rf-todo .rf-grp,.rf-todo .rf-grow{flex:1;min-width:0;display:block}
+.rf-todo .rf-proj{display:block;font-weight:600;font-size:15px;line-height:20px}
+.rf-todo .rf-q{display:block;font-size:14px;line-height:19px;color:var(--text2)}
+.rf-chev{flex:none;color:var(--text3);font-size:20px;line-height:20px}
+.rf-nonebtn{display:flex;align-items:center;justify-content:space-between;width:100%;min-height:52px;padding:0 16px;border:0;border-radius:16px;background:var(--fill);color:var(--text2);font:inherit;font-size:16px;text-align:left;cursor:pointer}
+.rf-nonebtn[aria-expanded="true"]{border-radius:16px 16px 0 0}
+.rf-nonelist{background:var(--fill);border-radius:0 0 16px 16px;padding:6px 16px 10px;font-size:15px;color:var(--text3)}
+.rf-noneitem{display:block;width:100%;padding:8px 0;border:0;background:transparent;color:var(--text3);font:inherit;font-size:15px;text-align:left}
+button.rf-noneitem{min-height:44px;cursor:pointer}
+@media (prefers-reduced-motion: reduce){.rf-cpill,.rf-chk,.rf-csend{transition:none}}
 </style>
 </head>
 <body>

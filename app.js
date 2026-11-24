@@ -33,7 +33,7 @@ var S = {
   drafts: Object.create(null), reqErr: "", unknown: Object.create(null), pairUI: null, relayReadyAt: 0, reqSnapAt: 0, focusTimer: 0, lastRefreshAt: 0, focusActiveAt: 0, undo: null,
   sk: { done: Object.create(null) }, ask: null, actOpen: false, savesOpen: false, saveSel: null, saveFocus: null, bannerOff: NaN, toastMsg: "",
   dragging: false, dirty: false, pinching: false, suppressUntil: 0, lastSig: "",
-  rf: { order: "effort", sheet: null, opener: null, local: Object.create(null), undone: Object.create(null), hold: Object.create(null), reqs: Object.create(null), vals: Object.create(null), checks: Object.create(null), askPend: Object.create(null), jobAsks: Object.create(null), overlay: Object.create(null), saveSt: Object.create(null), snz: false, confirm: "", gate: "", gateAns: null, gateSel: Object.create(null), gateBusy: false, deep: "", badge: -1, pageAt: Date.now(), sessMode: "home", saveFilter: "all", hideDetail: false, push: { sub: null, busy: false }, stack: { all: false, seen: Object.create(null), busy: Object.create(null), last: null } },
+  rf: { sweep: { busy: false, at: 0 }, sel: Object.create(null), oth: Object.create(null), noneOpen: false, order: "effort", sheet: null, opener: null, local: Object.create(null), undone: Object.create(null), hold: Object.create(null), reqs: Object.create(null), vals: Object.create(null), checks: Object.create(null), askPend: Object.create(null), jobAsks: Object.create(null), overlay: Object.create(null), saveSt: Object.create(null), snz: false, confirm: "", gate: "", gateAns: null, gateSel: Object.create(null), gateBusy: false, deep: "", badge: -1, pageAt: Date.now(), sessMode: "home", saveFilter: "all", hideDetail: false, push: { sub: null, busy: false }, stack: { all: false, seen: Object.create(null), busy: Object.create(null), last: null } },
   tab: "decide", filter: "all", query: "", pins: Object.create(null), readAt: Object.create(null), readBase: NaN, queue: [], qTimer: 0, sendWatch: Object.create(null), reqWatch: Object.create(null),
   schedules: { Mac: undefined, PC: undefined }, saveOpen: null, actExp: null, swiping: false, openRow: null, hint: true, needsMap: Object.create(null), unreadMap: Object.create(null), todayData: null,
   assistInfo: null, assistAbout: "", assistDraft: "", assistLocal: [], assistSentAt: 0, assistAiAtSend: 0, assistLast: null, assistReq: null, cardState: Object.create(null), pairWatch: null,
@@ -655,7 +655,7 @@ function listTargets(machines, now, onlineMs) {
 /** The fields of each request the page creates (contract v0.3.5): send/archive are targeted at the computer that lists the session; send carries a 5 min ttl; Refresh = one targeted list per online computer, or one untargeted list when none is online. */
 function sendFields(sid, text, machines, about, target) { var f = { action: "send", sessionId: sid, text: text, target: target || pickTarget(sid, machines), ttlSec: SEND_TTL_SEC }; if (about) f.about = about; return f; }
 /** ttlSec for every action the app creates (contract v0.7.2: 60-300). */
-var REQ_TTL = { send: 300, peek: 60, list: 60, archive: 120, restore: 120, start: 300, "agent-save": 300, "agent-run": 300, "agent-toggle": 300, "agent-delete": 300, "research-now": 300, unpair: 120, "pair-start": 120, pair: 120, answer: 120, "reload-config": 60, "away-set": 120, "perm-answer": 120, "q-answer": 120, "keep-awake": 120, "tidy-refresh": 60, "tidy-apply": 300, "tidy-undo": 120, "skill-verdict": 120, "decision-answer": 120, "decision-snooze": 120, "decision-dismiss": 120, "decision-undo": 120, "decision-ask": 120, "decision-doit": 120, "job-approve": 120, "job-skip": 120, "job-restore": 120, "push-subscribe": 120, "push-unsubscribe": 120 };
+var REQ_TTL = { send: 300, peek: 60, list: 60, archive: 120, restore: 120, start: 300, "agent-save": 300, "agent-run": 300, "agent-toggle": 300, "agent-delete": 300, "research-now": 300, unpair: 120, "pair-start": 120, pair: 120, answer: 120, "reload-config": 60, "away-set": 120, "perm-answer": 120, "q-answer": 120, "keep-awake": 120, "tidy-refresh": 60, "tidy-apply": 300, "tidy-undo": 120, "skill-verdict": 120, "decision-answer": 120, "decision-snooze": 120, "decision-dismiss": 120, "decision-undo": 120, "decision-ask": 120, "decision-doit": 120, "job-approve": 120, "job-skip": 120, "job-restore": 120, "push-subscribe": 120, "push-unsubscribe": 120, "sweep-refresh": 60 };
 function archiveFields(sid, machines, confirm) { var f = { action: "archive", sessionId: sid, target: pickTarget(sid, machines) }; if (confirm === true) f.confirm = true; return f; } // v17: confirm = the user was told what archiving this pinned / scheduled-task chat costs and said yes
 function refreshFields(machines, now, onlineMs) {
   var ts = listTargets(machines, now, onlineMs);
@@ -1444,7 +1444,7 @@ function retryGate(r, mstat, machines, listed) {
 /** Labelled lines for an expanded Activity row and for "Copy details". */
 function activityDetails(r, sessionTitle) {
   if (r._foreign) return [["What", "Request details not verified"], ["Status", str(r.status)]].concat([["Created", r.createdAt], ["Done", r.doneAt]].map(function (p) { var t = Date.parse(p[1]); return isFinite(t) ? [p[0], dayMonth(t) + " " + hhmm(t)] : null; }).filter(Boolean));
-  var out = [["What", ({ send: "Reply", archive: "Archive", list: "Refresh", peek: "Peek", start: "Start session", restore: "Restore", "agent-save": "Save agent", "agent-run": "Run agent", "agent-toggle": "Agent on/off", "research-now": "Research", pair: "Pair device", unpair: "Remove device", "away-set": "Away mode", "perm-answer": "Permission answer", "q-answer": "Question answer", "keep-awake": "Keep awake", "tidy-refresh": "Tidy refresh", "tidy-apply": "Tidy", "tidy-undo": "Undo Tidy", "skill-verdict": "Skill suggestion" })[r.action] || str(r.action)], ["Status", str(r.status)]];
+  var out = [["What", ({ send: "Reply", archive: "Archive", list: "Refresh", peek: "Peek", start: "Start session", restore: "Restore", "agent-save": "Save agent", "agent-run": "Run agent", "agent-toggle": "Agent on/off", "research-now": "Research", pair: "Pair device", unpair: "Remove device", "away-set": "Away mode", "perm-answer": "Permission answer", "q-answer": "Question answer", "keep-awake": "Keep awake", "tidy-refresh": "Tidy refresh", "tidy-apply": "Tidy", "tidy-undo": "Undo Tidy", "skill-verdict": "Skill suggestion", "sweep-refresh": "Check all chats" })[r.action] || str(r.action)], ["Status", str(r.status)]];
   if (sessionTitle) out.push(["Session", sessionTitle]);
   if (r.action === "start" && r.title) out.push(["Title", str(r.title)]);
   if (r.action === "start" && FOLDER_ID_RE.test(str(r.folderId))) out.push(["Folder", str(r.folderId) === "home" ? "Home folder" : str(r.folderId) === "kb" ? "KnowledgeBase" : str(r.folderId).slice(3)]);
@@ -1662,6 +1662,8 @@ function deviceIdInput(j) {
 /* ---------- v8.4: Autopilot (contract v0.10): gn/<machine>, agents/<machine>, requests ---------- */
 var TASK_ID_RE = /^T[0-9]+$/, SLUG_RE = /^[a-z0-9-]{1,40}$/, GN_STATES = ["queued", "running", "done", "failed", "waiting"], DAY3 = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"], TIME_RE = /^([01][0-9]|2[0-3]):[0-5][0-9]$/;
 function apStr(v, n) { return String(v == null ? "" : v).replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim().slice(0, n); }
+/** apStr for the sweep's own texts (option labels, descriptions, finished-chat titles, project names): zero-width and bidi characters are removed too, so text can never display right-to-left or hide a word. (Chat questions keep apStr: the pill rules refuse text that carries such characters.) */
+function apClean(v, n) { return apStr(String(v == null ? "" : v).replace(/[\u00ad\u200b-\u200f\u2028-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/g, ""), n); }
 function apPct(v) { var n = Number(v); return v !== null && v !== undefined && v !== "" && isFinite(n) && n >= 1 && n <= 100 && Math.floor(n) === n ? n : null; }
 /** gn/<machine> as the page uses it. null = no usable doc. */
 function cleanGn(d) {
@@ -2501,7 +2503,7 @@ Object.assign(QA_SKIP_WORDS, { "leave": "left as is", "no such group": "the grou
 var RF_EFFORT = ["", "1 tap", "1 min", "5 min", "needs you at the Mac", "needs money"];
 var RF_KINDS = ["choice", "text", "steps", "queue", "pay", "permission"], RF_SOURCES = ["chat", "away", "kb", "job"], RF_GATES = ["pay", "purchase", "signup", "message", "delete", "choice"];
 var RF_JOB_ST = ["needs-yes", "running", "approved", "done", "paused"], RF_TASK_ST = ["needs-yes", "approved", "skipped", "done", "running"];
-var RF_ACTIONS = ["decision-answer", "decision-snooze", "decision-dismiss", "decision-undo", "decision-ask", "decision-doit", "job-approve", "job-skip", "job-restore", "push-subscribe", "push-unsubscribe"];
+var RF_ACTIONS = ["decision-answer", "decision-snooze", "decision-dismiss", "decision-undo", "decision-ask", "decision-doit", "job-approve", "job-skip", "job-restore", "push-subscribe", "push-unsubscribe", "sweep-refresh"];
 var RF_HOSTS = ["web.push.apple.com", "fcm.googleapis.com", "updates.push.services.mozilla.com"];
 var RF_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}$/, RF_B64U = /^[A-Za-z0-9_-]+$/;
 var RF_MAX = { decisions: 40, cleared: 40, jobs: 10, tasks: 30, areas: 30, asks: 6, askQ: 300, askA: 600, text: 1000 };
@@ -2540,6 +2542,18 @@ function cleanGate(g) {
   if (o.kind === "choice") return o.item ? o : null; // an answer to Claude's own question: no recipient or account, the question and the exact picked label are what the yes covers
   return o.item && (o.recipient || o.account) ? o : null;
 }
+/** v0.13 decision sweep: up to 4 answer options the Mac verified against the chat's own words ({label, description}); fewer than 2 usable = none (a free-text box). `recommended` is the index into the CLEANED list, or -1. */
+function cleanChoices(list, rec) {
+  var out = [], at = -1, seen = Object.create(null);
+  (Array.isArray(list) ? list : []).slice(0, 4).forEach(function (c, i) {
+    var label = c && typeof c === "object" ? apClean(c.label, 40) : "";
+    if (!label || seen[label.toLowerCase()] || RF_CTRL.test(label)) return;
+    seen[label.toLowerCase()] = true;
+    if (i === rec) at = out.length;
+    out.push({ label: label, description: c && typeof c.description === "string" ? apClean(c.description, 120) : "" });
+  });
+  return out.length >= 2 ? { choices: out, recommended: at } : { choices: [], recommended: -1 };
+}
 function cleanDecision(x, machine) {
   if (!x || typeof x !== "object" || !QA_HEX32.test(str(x.id)) || RF_KINDS.indexOf(x.kind) < 0) return null;
   var effort = Number(x.effort), ask = apStr(x.ask, 140);
@@ -2547,8 +2561,9 @@ function cleanDecision(x, machine) {
   if (x.gate != null && effort < 2) effort = 2; // a gated or broken-gated decision is never a "1 tap" one
   var area = x.area && typeof x.area === "object" && QA_GROUP_ID_RE.test(str(x.area.id)) ? { id: x.area.id, name: apStr(x.area.name, 40) || x.area.id } : { id: "unsorted", name: "Unsorted" };
   var gate = x.gate === undefined || x.gate === null ? null : cleanGate(x.gate);
-  return { id: x.id, machine: machine, sessionId: QA_SID_RE.test(str(x.sessionId)) ? x.sessionId : "", source: RF_SOURCES.indexOf(x.source) >= 0 ? x.source : "chat",
-    project: apStr(x.project, 80) || "Chat", area: area, ask: ask, effort: effort, kind: x.kind,
+  var cc = x.kind === "text" ? cleanChoices(x.choices, x.recommended) : { choices: [], recommended: -1 };
+  return { cls: x.cls === "todo" || x.cls === "none" ? x.cls : "decide", clsKnown: x.cls === "decide" || x.cls === "todo" || x.cls === "none", choices: cc.choices, recommended: cc.recommended, id: x.id, machine: machine, sessionId: QA_SID_RE.test(str(x.sessionId)) ? x.sessionId : "", source: RF_SOURCES.indexOf(x.source) >= 0 ? x.source : "chat",
+    project: apClean(x.project, 80) || "Chat", area: area, ask: ask, effort: effort, kind: x.kind,
     options: x.kind === "choice" ? rfList(x.options, 6, 80) : [], placeholder: apStr(x.placeholder, 60), multiline: x.multiline === true, steps: x.kind === "steps" ? rfList(x.steps, 8, 160) : [],
     what: apStr(x.what, 300), why: apStr(x.why, 300), skip: apStr(x.skip, 300), doit: apStr(x.doit, 300), canDoIt: x.canDoIt === true, gate: gate, gateRaw: gate ? JSON.parse(JSON.stringify(x.gate)) : null, gateBad: x.gate != null && !gate,
     where: (Array.isArray(x.where) ? x.where : []).slice(0, 6).map(function (w) { return w && typeof w === "object" ? { text: apStr(w.text, 160), href: rfHref(w.href) } : null; }).filter(function (w) { return w && w.text; }),
@@ -2606,21 +2621,34 @@ function cleanPush(p) {
   if (p.on && typeof p.on === "object") Object.keys(p.on).slice(0, 10).forEach(function (id) { if (/^[0-9a-f]{32}$/.test(id) && p.on[id] && typeof p.on[id] === "object") out.on[id] = { lastAlertAt: rfTime(p.on[id].lastAlertAt), hideDetail: typeof p.on[id].hideDetail === "boolean" ? p.on[id].hideDetail : null }; });
   return out;
 }
+/** The sweep's sort of the waiting chats: counts and the finished chats (id and title only). null = the Mac does not send one (an older Mac): Decide then looks as it always did. */
+function cleanSweep(sw, machine) {
+  if (!sw || typeof sw !== "object" || !sw.counts || typeof sw.counts !== "object") return null;
+  var n = function (v) { v = Number(v); return isFinite(v) && v >= 0 && v <= 9999 ? Math.floor(v) : 0; };
+  var none = [];
+  (Array.isArray(sw.none) ? sw.none : []).slice(0, 60).forEach(function (x) { if (x && typeof x === "object" && RF_ID_RE.test(str(x.id))) none.push({ id: x.id, title: apClean(x.title, 60) || "Chat", machine: machine }); });
+  return { counts: { decide: n(sw.counts.decide), todo: n(sw.counts.todo), none: n(sw.counts.none) }, none: none, pending: n(sw.pending), machine: machine, at: rfTime(sw.at) };
+}
 /** One heartbeat's refocus fields, cleaned. A heartbeat without them (an older bridge) gives empty lists and known:false. */
 function cleanRefocus(m, machine) {
   var k = !!m && typeof m === "object" && (Array.isArray(m.decisions) || Array.isArray(m.jobs) || Array.isArray(m.areas));
-  if (!k) return { known: false, areas: cleanAreas(null), decisions: [], cleared: [], jobs: [], asks: Object.create(null), push: cleanPush(null) };
-  return { known: true, areas: cleanAreas(m.areas), decisions: cleanDecisions(m.decisions, machine), cleared: cleanCleared(m.cleared, machine), jobs: cleanJobs(m.jobs, machine), asks: cleanAsks(m.asks), push: cleanPush(m.push) };
+  if (!k) return { known: false, areas: cleanAreas(null), decisions: [], cleared: [], jobs: [], asks: Object.create(null), push: cleanPush(null), sweep: null };
+  return { known: true, areas: cleanAreas(m.areas), decisions: cleanDecisions(m.decisions, machine), cleared: cleanCleared(m.cleared, machine), jobs: cleanJobs(m.jobs, machine), asks: cleanAsks(m.asks), push: cleanPush(m.push), sweep: cleanSweep(m.sweep, machine) };
 }
 /** Several computers: lists joined (decisions re-sorted), areas by id, the first computer's push key. */
 function rfMerge(parts) {
-  var out = { known: false, areas: [], decisions: [], cleared: [], jobs: [], asks: Object.create(null), push: { vapidKey: "", on: Object.create(null), machine: "" } }, seenA = Object.create(null);
+  var out = { known: false, areas: [], decisions: [], cleared: [], jobs: [], asks: Object.create(null), push: { vapidKey: "", on: Object.create(null), machine: "" }, sweep: null }, seenA = Object.create(null);
   parts.forEach(function (p) {
     if (!p || !p.rf || !p.rf.known) return;
     var r = p.rf; out.known = true;
     r.areas.forEach(function (a) { if (!seenA[a.id]) { seenA[a.id] = true; out.areas.push(a); } });
     out.decisions = out.decisions.concat(r.decisions); out.cleared = out.cleared.concat(r.cleared); out.jobs = out.jobs.concat(r.jobs);
     Object.keys(r.asks).forEach(function (k) { out.asks[k] = r.asks[k]; });
+    if (r.sweep) { // several computers: counts add up; "Check all chats" asks the first computer that sorts chats
+      if (!out.sweep) out.sweep = { counts: { decide: 0, todo: 0, none: 0 }, none: [], pending: 0, machine: r.sweep.machine, at: r.sweep.at };
+      ["decide", "todo", "none"].forEach(function (k) { out.sweep.counts[k] += r.sweep.counts[k]; });
+      out.sweep.none = out.sweep.none.concat(r.sweep.none); out.sweep.pending += r.sweep.pending;
+    }
     if (r.push.vapidKey && !out.push.vapidKey) { out.push.vapidKey = r.push.vapidKey; out.push.machine = p.name; }
     Object.keys(r.push.on).forEach(function (id) { out.push.on[id] = r.push.on[id]; });
   });
@@ -2631,6 +2659,22 @@ function rfMerge(parts) {
 function rfPending(decisions, local, now) {
   return (decisions || []).filter(function (d) { return !(local && local[d.id]) && !(isFinite(d.snoozedUntil) && d.snoozedUntil > now) && !(isFinite(d.expiresAt) && d.expiresAt <= now); });
 }
+/** v0.13: the pending decisions split by the Mac's sort. An item with no class (an older Mac) is a decision. `none` never reaches this list (the Mac keeps it out of `decisions`), but a stray one is not shown. */
+function rfSplit(pending) {
+  var out = { decide: [], todo: [] };
+  (pending || []).forEach(function (d) { if (d.cls === "todo") out.todo.push(d); else if (d.cls !== "none") out.decide.push(d); });
+  return out;
+}
+/** "3 decisions · 3 to-dos · 16 nothing needed" (a 1 reads "1 decision", "1 to-do"). */
+function rfSweepLine(nDecide, nTodo, nNone) { return nDecide + " decision" + (nDecide === 1 ? "" : "s") + " \u00b7 " + nTodo + " to-do" + (nTodo === 1 ? "" : "s") + " \u00b7 " + nNone + " nothing needed"; }
+/** The pills of a decision card: the Mac's verified options with the recommended one first and marked, or Yes / No for a yes/no question. Each is the exact text a tap sends. */
+function rfCardPills(d) {
+  if (d.kind === "choice" && d.options.length) return d.options.map(function (o) { return { label: o, description: "", rec: false }; });
+  var out = (d.choices || []).map(function (c, i) { return { label: c.label, description: c.description, rec: i === d.recommended }; });
+  return out.filter(function (c) { return c.rec; }).concat(out.filter(function (c) { return !c.rec; }));
+}
+/** Which decisions get a card with pills: a chat's own question (a typed answer or yes/no) that has a usable gate. Everything else keeps its row (permission, steps, pay, queue, KB items). */
+function rfIsCard(d) { return d.source === "chat" && !d.gateBad && !!d.gate && (d.kind === "text" || (d.kind === "choice" && d.options.length > 0)); }
 /** Summary card: quick = effort 1-2 (1 tap counts 0.3 min, 1 min counts 1). */
 function rfSummary(pending, clearedN) {
   var quick = pending.filter(function (d) { return d.effort <= 2; }), mins = Math.max(1, Math.round(quick.reduce(function (a, d) { return a + (d.effort === 1 ? 0.3 : 1); }, 0))), total = pending.length + clearedN;
@@ -2766,6 +2810,8 @@ function rfPushSubFields(sub, target, hideDetail) {
   return Object.assign(rfBaseF("push-subscribe", target), { endpoint: sub.endpoint, p256dh: sub.p256dh, auth: sub.auth, hideDetail: hideDetail === true });
 }
 function rfPushUnsubFields(target) { return target ? rfBaseF("push-unsubscribe", target) : null; }
+/** "Check all chats": one signed request that makes the Mac read every waiting chat again and sort it now. The Mac allows one per 30 seconds. */
+function rfSweepFields(target) { return target ? Object.assign(rfBaseF("sweep-refresh", target), { ttlSec: 60 }) : null; }
 /** "" when a refocus request is well formed, else why not (createRequest sends nothing in that case). */
 function rfInvalid(f) {
   if (!f || !f.target) return "no computer";
@@ -2779,6 +2825,7 @@ function rfInvalid(f) {
     case "job-approve": case "job-skip": case "job-restore": return RF_ID_RE.test(str(f.jobId)) && Array.isArray(f.taskIds) && f.taskIds.length >= 1 && f.taskIds.length <= RF_MAX.tasks && f.taskIds.every(function (i) { return RF_ID_RE.test(str(i)); }) && Array.isArray(f.taskHashes) && f.taskHashes.length === f.taskIds.length && f.taskHashes.every(function (x) { return QA_HEX64.test(str(x)); }) ? "" : "bad job";
     case "push-subscribe": return rfPushEndpointOk(f.endpoint) && /^[A-Za-z0-9_-]{80,90}$/.test(str(f.p256dh)) && /^[A-Za-z0-9_-]{20,24}$/.test(str(f.auth)) ? "" : "bad subscription";
     case "push-unsubscribe": return "";
+    case "sweep-refresh": return "";
   }
   return "unknown action";
 }
@@ -2894,6 +2941,7 @@ function rfGeneric(code) { var c = str(code).replace(/^tool error:\s*/i, "").rep
 /** The plain sentence for a known refusal (a refocus action's own code, or a start the Mac has switched off), else "". */
 function rfRefusal(action, out) {
   var t = str(out).trim(), bare = t.replace(/^tool error:\s*/i, "");
+  if (action === "sweep-refresh") { var wm = /^try again in (\d{1,5})s$/.exec(bare); if (wm) return "Just checked. Try again in " + wm[1] + " s."; }
   if (RF_ACTIONS.indexOf(action) >= 0) return RF_ERRORS[bare] || RF_ERRORS[t] || "";
   if ((action === "send" || action === "answer" || action === "quick-reply") && bare === "gate-needs-yes") return RF_ERRORS[bare]; // L3: a refused plain send never shows the raw code
   if (action === "start" && RF_START_OFF.test(bare)) return "Starting chats from the phone comes with the runner (phase 2).";
@@ -4503,7 +4551,7 @@ function apDetail(d) {
 
 /* ---------- Saves and Activity tabs ---------- */
 var STATUS_LABEL = Object.assign(Object.create(null), { "new": "New", claimed: "Claimed", done: "Done", error: "Error", unverified: "Unverified", unknown: "Unknown \u2014 check" });
-var ACTION_LABEL = Object.assign(Object.create(null), { send: "Reply", archive: "Archive", list: "Refresh", peek: "Peek", start: "Start session", restore: "Restore", "agent-save": "Save agent", "agent-run": "Run agent", "agent-toggle": "Agent on/off", "research-now": "Research", pair: "Pair device", unpair: "Remove device", "away-set": "Away mode", "perm-answer": "Permission answer", "q-answer": "Question answer", "keep-awake": "Keep awake", "tidy-refresh": "Tidy refresh", "tidy-apply": "Tidy", "tidy-undo": "Undo Tidy", "skill-verdict": "Skill suggestion" });
+var ACTION_LABEL = Object.assign(Object.create(null), { send: "Reply", archive: "Archive", list: "Refresh", peek: "Peek", start: "Start session", restore: "Restore", "agent-save": "Save agent", "agent-run": "Run agent", "agent-toggle": "Agent on/off", "research-now": "Research", pair: "Pair device", unpair: "Remove device", "away-set": "Away mode", "perm-answer": "Permission answer", "q-answer": "Question answer", "keep-awake": "Keep awake", "tidy-refresh": "Tidy refresh", "tidy-apply": "Tidy", "tidy-undo": "Undo Tidy", "skill-verdict": "Skill suggestion", "sweep-refresh": "Check all chats" });
 function focusables(root) { return Array.prototype.slice.call(root.querySelectorAll('a[href],button:not([disabled]),input:not([disabled]),select,textarea,[tabindex="0"]')); }
 /** Keep Tab inside a sheet: wraps last -> first and first (or the title) -> last. */
 function trapTab(e, root) {
@@ -5706,7 +5754,7 @@ function rfKey(model) {
   var R = rfData(), now = Date.now();
   return JSON.stringify([R.known, R.decisions.map(function (d) { return [d.id, d.effort, d.ask, d.project, d.area.id, d.snoozedUntil > now, !!S.rf.local[d.id]]; }), R.cleared.map(function (c) { return [c.id, c.outcome, c.undo]; }),
     Object.keys(S.rf.local).map(function (k) { return [k, S.rf.local[k].outcome, S.rf.local[k].undo]; }), R.jobs.map(function (j) { return [j.id, j.status, j.progress, j.summary, j.tasks.map(function (t) { return [t.id, t.status]; })]; }), Object.keys(S.rf.overlay).length,
-    S.rf.order, S.rf.sessMode, S.rf.saveFilter, S.rf.stack.all, Object.keys(S.rf.stack.seen).join(), S.rf.stack.last && [S.rf.stack.last.sid, S.rf.stack.last.state, S.rf.stack.last.applyId], S.byId ? Object.keys(S.byId).length : 0, S.model ? S.model.sessions.map(function (s) { return [s.id, rfAreaOf(s), s.title]; }) : 0,
+    S.rf.order, R.sweep && [R.sweep.counts, R.sweep.pending, R.sweep.none.length, S.rf.noneOpen, S.rf.sweep.busy], R.decisions.map(function (d) { return [d.cls, (d.choices || []).length, d.recommended, S.rf.sel[d.id]]; }), S.rf.sessMode, S.rf.saveFilter, S.rf.stack.all, Object.keys(S.rf.stack.seen).join(), S.rf.stack.last && [S.rf.stack.last.sid, S.rf.stack.last.state, S.rf.stack.last.applyId], S.byId ? Object.keys(S.byId).length : 0, S.model ? S.model.sessions.map(function (s) { return [s.id, rfAreaOf(s), s.title]; }) : 0,
     NAMES.map(function (n) { var t = S.model && S.model.mstat[n].tidy; return t ? t.at + ":" + t.items.length : 0; })]);
 }
 function rfTone(areaId) { var t = rfAreaTone(areaId, rfData().areas); return t < 0 ? "u" : String(t); }
@@ -5869,11 +5917,106 @@ function rfDecRow(d) {
   return h("div", { "class": "rf-row" }, h("button", { "class": "rf-dmain", type: "button", "data-k": "rf-dec-" + d.id, onclick: function (e) { rfOpenDec(d.id, e.currentTarget); } },
     rfMeter(d.effort), h("span", { "class": "rf-dtxt" }, h("span", { "class": "rf-proj", text: d.project }), h("span", { "class": "rf-q", text: d.ask })), rfChip(RF_EFFORT[d.effort], "e" + d.effort)));
 }
+/* ----- v0.13 decision sweep: the Decide tab as a sorted list. Decisions are cards with tappable options (the tap only fills the answer: the existing yes screen still says yes, and its hash covers the exact label),
+   to-dos are a short list, finished chats one folded row. Only used when the Mac sends `sweep`; an older Mac gets the list below as it always was. ----- */
+function rfSweepCheck(R) {
+  var sw = S.rf.sweep, now = Date.now(), tgt = R.sweep && R.sweep.machine;
+  if (sw.busy) return;
+  if (now - sw.at < 30000) { toast("Just checked. Try again in " + Math.max(1, Math.ceil((30000 - (now - sw.at)) / 1000)) + " s."); return; }
+  var f = rfSweepFields(tgt); if (!f) { toast("No computer to ask."); return; }
+  sw.busy = true; sw.at = now; render(true);
+  var n = R.sweep.counts.decide + R.sweep.counts.todo + R.sweep.counts.none + R.sweep.pending;
+  rfSend(f, { onDone: function () { sw.busy = false; toast("Checked " + n + " chat" + (n === 1 ? "" : "s") + "."); render(true); }, onFail: function () { sw.busy = false; render(true); } }).then(function (rid) { if (!rid) { sw.busy = false; render(true); } });
+}
+/** The answer a card would send: the picked option's exact label, or the typed "Other" text. "" = nothing picked yet. */
+function rfCardAnswer(d, pills) {
+  var sel = S.rf.sel[d.id];
+  if (sel === "o") return str(S.rf.oth[d.id]).trim();
+  // the pick is stored as the LABEL ("p:" + label), not a position: a heartbeat that reorders the pills cannot change what Send sends
+  if (typeof sel === "string" && sel.indexOf("p:") === 0) { for (var i = 0; i < pills.length; i++) if (pills[i].label === sel.slice(2)) return pills[i].label; }
+  return "";
+}
+/** Send on a card opens the SAME yes screen as before, with this exact answer on it. Nothing is sent until the yes tap there. */
+function rfCardSend(d, pills) {
+  var ans = rfCardAnswer(d, pills); if (!ans) return;
+  if (!rfAnswerFields(d, { answer: ans }, d.machine, "0".repeat(64))) { toast("That answer has characters it can’t carry."); return; }
+  rfOpenDec(d.id, null);
+  S.rf.vals[d.id] = ans; S.rf.gateAns = { id: d.id, answer: ans }; S.rf.gate = d.id; renderDec();
+}
+function rfCard(d) {
+  var pills = rfCardPills(d), free = d.kind === "text", sel = S.rf.sel[d.id];
+  var card = h("div", { "class": "rf-card", "data-k": "rf-card-" + d.id });
+  card.appendChild(h("div", { "class": "rf-ck", text: d.project }));
+  card.appendChild(h("div", { "class": "rf-cq", text: d.ask }));
+  var grp = h("div", { "class": "rf-cpills", role: "radiogroup", "aria-label": d.ask });
+  var send = h("button", { "class": "rf-csend", type: "button", "data-k": "rf-csend-" + d.id, onclick: function () { rfCardSend(d, pills); } });
+  var refreshSend = function () { var a = rfCardAnswer(d, pills); send.disabled = !a; send.textContent = a ? "Send" : "Pick an answer"; };
+  pills.forEach(function (o, i) {
+    var on = sel === "p:" + o.label;
+    grp.appendChild(h("button", { "class": "rf-cpill", type: "button", role: "radio", "aria-checked": String(on), "data-k": "rf-copt-" + d.id + "-" + i, onclick: function () { S.rf.sel[d.id] = "p:" + o.label; render(true); } },
+      h("span", { text: o.label }), o.rec ? h("span", { "class": "rf-tag", text: "Recommended" }) : null));
+    if (on && o.description) grp.appendChild(h("div", { "class": "rf-cdesc", text: o.description }));
+  });
+  if (free) {
+    if (pills.length) grp.appendChild(h("button", { "class": "rf-cpill", type: "button", role: "radio", "aria-checked": String(sel === "o"), "data-k": "rf-cother-" + d.id, onclick: function () { S.rf.sel[d.id] = "o"; render(true); var oi = document.querySelector('[data-k="rf-coth-' + d.id + '"]'); if (oi && oi.focus) oi.focus(); } }, h("span", { text: "Other\u2026" })));
+    if (sel === "o" || !pills.length) { // no options (the model failed, or the chat listed none): just the box
+      if (!pills.length) S.rf.sel[d.id] = "o";
+      var inp = h("input", { "class": "rf-oth", type: "text", "data-k": "rf-coth-" + d.id, placeholder: "Type your answer", "aria-label": "Your answer", maxlength: "600", value: S.rf.oth[d.id] || "" });
+      inp.addEventListener("input", function () { S.rf.oth[d.id] = inp.value; refreshSend(); });
+      grp.appendChild(inp);
+    }
+  }
+  card.appendChild(grp);
+  if (!free) card.appendChild(h("div", { "class": "rf-note", text: "Something else to say? Open the full chat." }));
+  refreshSend();
+  card.appendChild(send);
+  if (!free && d.sessionId && S.byId && S.byId[d.sessionId]) card.appendChild(h("button", { "class": "rf-link", type: "button", "data-k": "rf-copen-" + d.id, onclick: function () { openFocus(d.sessionId); }, text: "Open chat" }));
+  return card;
+}
+function rfTodoRow(d) {
+  var chat = !!(d.sessionId && S.byId && S.byId[d.sessionId]);
+  return h("button", { "class": "rf-todo", type: "button", "data-k": "rf-todo-" + d.id, onclick: function (e) { if (chat) openFocus(d.sessionId); else rfOpenDec(d.id, e.currentTarget); } },
+    h("span", { "class": "rf-grow" }, h("span", { "class": "rf-proj", text: d.project }), h("span", { "class": "rf-q", text: d.what || d.ask })), h("span", { "class": "rf-chev", "aria-hidden": "true", text: "›" }));
+}
+function sweepDecideNode(model, R, pend, cl) {
+  var f = document.createDocumentFragment(), sp = rfSplit(pend), sw = R.sweep, busy = S.rf.sweep.busy || sw.pending > 0;
+  var total = sp.decide.length + sp.todo.length + sw.counts.none + sw.pending;
+  f.appendChild(h("div", { "class": "rf-sumline", "data-k": "rf-sweep-sum", role: "status", text: sw.pending > 0 ? "Checking " + sw.pending + " chat" + (sw.pending === 1 ? "" : "s") + "…" : rfSweepLine(sp.decide.length, sp.todo.length, sw.counts.none) }));
+  f.appendChild(h("button", { "class": "rf-chk", type: "button", "data-k": "rf-sweep-check", disabled: busy ? "" : null, onclick: function () { rfSweepCheck(R); }, text: busy ? "Checking " + total + " chat" + (total === 1 ? "" : "s") + "…" : "Check all chats" }));
+  if (!sp.decide.length && !sp.todo.length && !sw.pending) f.appendChild(h("div", { "class": "rf-empty", "data-k": "rf-allclear" }, h("b", { text: "Nothing needs you." }), h("span", { text: " " + sw.counts.none + " chat" + (sw.counts.none === 1 ? "" : "s") + " checked." })));
+  if (sp.decide.length) {
+    f.appendChild(rfSec("Decide", sp.decide.length));
+    sp.decide.forEach(function (d) { if (rfIsCard(d)) f.appendChild(rfCard(d)); else { var g = h("div", { "class": "rf-grp" }); g.appendChild(rfDecRow(d)); f.appendChild(g); } });
+  }
+  if (sp.todo.length) {
+    f.appendChild(rfSec("To-dos for you", sp.todo.length));
+    var tg = h("div", { "class": "rf-grp", "data-k": "rf-todos" }); sp.todo.forEach(function (d) { tg.appendChild(rfTodoRow(d)); }); f.appendChild(tg);
+  }
+  if (sw.counts.none > 0) {
+    f.appendChild(h("div", { "class": "rf-sec" }, h("span", { text: "Finished" })));
+    f.appendChild(h("button", { "class": "rf-nonebtn", type: "button", "data-k": "rf-none-toggle", "aria-expanded": String(S.rf.noneOpen), onclick: function () { S.rf.noneOpen = !S.rf.noneOpen; render(true); } },
+      h("span", { text: sw.counts.none + " chat" + (sw.counts.none === 1 ? "" : "s") + " — nothing needed" }), h("span", { "class": "rf-chev", "aria-hidden": "true", text: S.rf.noneOpen ? "⌃" : "⌄" })));
+    if (S.rf.noneOpen) {
+      var ul = h("div", { "class": "rf-nonelist", "data-k": "rf-none-list" });
+      sw.none.forEach(function (n) {
+        var chat = !!(S.byId && S.byId[n.id]);
+        ul.appendChild(chat ? h("button", { "class": "rf-noneitem", type: "button", "data-k": "rf-none-" + n.id, onclick: function () { openFocus(n.id); }, text: n.title }) : h("div", { "class": "rf-noneitem", text: n.title }));
+      });
+      f.appendChild(ul);
+    }
+  }
+  if (cl.length) {
+    f.appendChild(rfSec("Cleared today", cl.length));
+    var cg = h("div", { "class": "rf-grp", "data-k": "rf-cleared" }); cl.forEach(function (c) { cg.appendChild(rfClearedRow(c)); }); f.appendChild(cg);
+  }
+  return f;
+}
 function decideNode(model) {
   var f = document.createDocumentFragment(), R = rfData(), now = Date.now();
   if (!model.loaded) return emptyBox("Connecting…", "Waiting for your computers to report in.");
   if (!R.known) return emptyBox("Decisions need a Mac update", "Your Mac isn’t sending decisions yet. Update Mission Control on the Mac, then reopen this.");
   var pend = rfPendNow(), cl = rfClearedList(R.cleared, S.rf.local, S.rf.undone, now), sm = rfSummary(pend, cl.length);
+  if (R.sweep) return sweepDecideNode(model, R, pend, cl); // v0.13: a Mac that sorts its waiting chats; an older one falls through to the list below
   f.appendChild(h("div", { "class": "rf-summary", "data-k": "rf-summary" }, h("div", { "class": "rf-grow" }, h("div", { "class": "rf-strong", text: sm.text }), h("div", { "class": "rf-tiny", text: sm.clearedText })),
     h("div", { "class": "rf-bar", role: "progressbar", "aria-label": "Cleared today", "aria-valuemin": "0", "aria-valuemax": "100", "aria-valuenow": String(sm.pct) }, h("i", { style: "width:" + sm.pct + "%" }))));
   var seg = h("div", { "class": "rf-seg2", role: "group", "aria-label": "Sort decisions" });
