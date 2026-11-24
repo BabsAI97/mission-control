@@ -1,8 +1,8 @@
 {
-  "v": 17,
+  "v": 18,
   "files": {
     "README.md": "7d4dae276e29e792b3a6d36d37f7777844b33627e0480f40d36da0c1a199b269",
-    "app.js": "ab3f07310d6e52435fdd69c404cfb0a638b2722e2cecbbacb3611e5fa3de4432",
+    "app.js": "712462e259db474b7e100e1ae3e49ad4495210ead7e735c2a852e43d90135cad",
     "config.js": "6c15f7216e961e1ae126b957affaed3f36466a74c464d2df53fe206ee3a8423d",
     "guard.js": "3c8c7597ffed38ea077179d08b947d4550c4faf5484cab0e000989f5d710f537",
     "icons/icon-180.png": "b8432959d8adf3d86dcb455b610b0fcdf84c92e7d0ee76fefe0254f6adb058c1",
@@ -12,6 +12,6 @@
     "manifest.webmanifest": "5db574961b46b27843074260672e1ca3e5efc47a3ffe0c695b11d2874732eb92",
     "pwa.js": "6bf23880efe41c12c8637941a189856b062e400d3b0344e96b20febc381f9bdd",
     "relay.js": "916acae49a267ae69186c174bd9a4071f6cb5d3ea262e67acbf491e4b4c9367c",
-    "sw.js": "032647e799f98aee83aabcc26d036b0511e63c1c5b44c30af86721c57bb3714a"
+    "sw.js": "d0476d14d97ee9593fec6f2f01d58d836cb19af3ba5ae24f15bbbfbe903f1b70"
   }
 }

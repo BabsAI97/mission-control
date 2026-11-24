@@ -33,7 +33,7 @@ var S = {
   drafts: Object.create(null), reqErr: "", unknown: Object.create(null), pairUI: null, relayReadyAt: 0, reqSnapAt: 0, focusTimer: 0, lastRefreshAt: 0, focusActiveAt: 0, undo: null,
   sk: { done: Object.create(null) }, ask: null, actOpen: false, savesOpen: false, saveSel: null, saveFocus: null, bannerOff: NaN, toastMsg: "",
   dragging: false, dirty: false, pinching: false, suppressUntil: 0, lastSig: "",
-  rf: { order: "effort", sheet: null, opener: null, local: Object.create(null), undone: Object.create(null), hold: Object.create(null), reqs: Object.create(null), vals: Object.create(null), checks: Object.create(null), askPend: Object.create(null), jobAsks: Object.create(null), overlay: Object.create(null), saveSt: Object.create(null), snz: false, confirm: "", gate: "", gateAns: null, gateSel: Object.create(null), gateBusy: false, deep: "", badge: -1, pageAt: Date.now(), sessMode: "home", saveFilter: "all", showNames: false, push: { sub: null, busy: false }, stack: { all: false, seen: Object.create(null), busy: Object.create(null), last: null } },
+  rf: { order: "effort", sheet: null, opener: null, local: Object.create(null), undone: Object.create(null), hold: Object.create(null), reqs: Object.create(null), vals: Object.create(null), checks: Object.create(null), askPend: Object.create(null), jobAsks: Object.create(null), overlay: Object.create(null), saveSt: Object.create(null), snz: false, confirm: "", gate: "", gateAns: null, gateSel: Object.create(null), gateBusy: false, deep: "", badge: -1, pageAt: Date.now(), sessMode: "home", saveFilter: "all", hideDetail: false, push: { sub: null, busy: false }, stack: { all: false, seen: Object.create(null), busy: Object.create(null), last: null } },
   tab: "decide", filter: "all", query: "", pins: Object.create(null), readAt: Object.create(null), readBase: NaN, queue: [], qTimer: 0, sendWatch: Object.create(null), reqWatch: Object.create(null),
   schedules: { Mac: undefined, PC: undefined }, saveOpen: null, actExp: null, swiping: false, openRow: null, hint: true, needsMap: Object.create(null), unreadMap: Object.create(null), todayData: null,
   assistInfo: null, assistAbout: "", assistDraft: "", assistLocal: [], assistSentAt: 0, assistAiAtSend: 0, assistLast: null, assistReq: null, cardState: Object.create(null), pairWatch: null,
@@ -693,7 +693,7 @@ function requestBody(f, id, iso) {
   if (f.action === "decision-ask") { body.decisionId = f.decisionId; body.question = f.question; }
   if (f.action === "decision-doit") { body.decisionId = f.decisionId; if (f.actionHash) body.actionHash = f.actionHash; }
   if (f.action === "job-approve" || f.action === "job-skip" || f.action === "job-restore") { body.jobId = f.jobId; body.taskIds = f.taskIds.slice(); body.taskHashes = f.taskHashes.slice(); }
-  if (f.action === "push-subscribe") { body.endpoint = f.endpoint; body.p256dh = f.p256dh; body.auth = f.auth; }
+  if (f.action === "push-subscribe") { body.endpoint = f.endpoint; body.p256dh = f.p256dh; body.auth = f.auth; if (f.hideDetail === true) body.hideDetail = true; }
 
   // r3: a start of kind command / saved carries ONLY the command key or the saved prompt's id: no title, no prompt, no project (the Mac refuses any text for these kinds)
   if (f.action === "start" && f.kind === "command") { body.kind = "command"; body.command = f.command; }
@@ -2603,7 +2603,7 @@ function cleanPush(p) {
   if (!p || typeof p !== "object") return out;
   var k = str(p.vapidKey);
   if (/^[A-Za-z0-9_-]{86,88}$/.test(k)) out.vapidKey = k;
-  if (p.on && typeof p.on === "object") Object.keys(p.on).slice(0, 10).forEach(function (id) { if (/^[0-9a-f]{32}$/.test(id) && p.on[id] && typeof p.on[id] === "object") out.on[id] = { lastAlertAt: rfTime(p.on[id].lastAlertAt) }; });
+  if (p.on && typeof p.on === "object") Object.keys(p.on).slice(0, 10).forEach(function (id) { if (/^[0-9a-f]{32}$/.test(id) && p.on[id] && typeof p.on[id] === "object") out.on[id] = { lastAlertAt: rfTime(p.on[id].lastAlertAt), hideDetail: typeof p.on[id].hideDetail === "boolean" ? p.on[id].hideDetail : null }; });
   return out;
 }
 /** One heartbeat's refocus fields, cleaned. A heartbeat without them (an older bridge) gives empty lists and known:false. */
@@ -2761,9 +2761,9 @@ function rfPushEndpointOk(u) {
   var m = /^https:\/\/([a-z0-9.-]+)(\/[A-Za-z0-9_\-\/.~%=+]*)$/.exec(str(u));
   return !!m && str(u).length <= 600 && RF_HOSTS.indexOf(m[1]) >= 0;
 }
-function rfPushSubFields(sub, target) {
+function rfPushSubFields(sub, target, hideDetail) {
   if (!target || !sub || !rfPushEndpointOk(sub.endpoint) || !/^[A-Za-z0-9_-]{80,90}$/.test(str(sub.p256dh)) || !/^[A-Za-z0-9_-]{20,24}$/.test(str(sub.auth))) return null;
-  return Object.assign(rfBaseF("push-subscribe", target), { endpoint: sub.endpoint, p256dh: sub.p256dh, auth: sub.auth });
+  return Object.assign(rfBaseF("push-subscribe", target), { endpoint: sub.endpoint, p256dh: sub.p256dh, auth: sub.auth, hideDetail: hideDetail === true });
 }
 function rfPushUnsubFields(target) { return target ? rfBaseF("push-unsubscribe", target) : null; }
 /** "" when a refocus request is well formed, else why not (createRequest sends nothing in that case). */
@@ -2848,10 +2848,10 @@ function rfPushText(state, lastAt, now) {
 /** #d=<decision id> and nothing else (a fragment, never a query string). */
 function rfParseHash(hash) { var m = /^#d=([0-9a-f]{32})$/.exec(str(hash)); return m ? m[1] : ""; }
 function rfBadgeCount(n) { n = Math.floor(Number(n)); return isFinite(n) && n > 0 ? Math.min(n, 99) : 0; }
-/** The alert's words as the service worker shows them: payload title/body, but a generic title unless the "show project names" setting is on. */
-function rfAlertText(p, showNames) {
-  var body = apStr(p && p.body, 100), title = apStr(p && p.title, 80);
-  return { title: showNames && title ? title : "A decision needs you", body: body || "Open Mission Control" };
+/** The alert's words as the service worker shows them: the payload's title and body as the Mac sent them (the Mac sends the minimal alert when "Hide details" is on). */
+function rfAlertText(p) {
+  var body = apStr(p && p.body, 180), title = apStr(p && p.title, 100);
+  return { title: title || "A decision needs you", body: body || "Open Mission Control" };
 }
 /* ----- plain refusal sentences (fix 3) ----- */
 var RF_ERRORS = {
@@ -4821,7 +4821,7 @@ function renderMenu() {
   var host = $("menuHost"), btn = $("moreBtn"), m = S.model;
   btn.setAttribute("aria-expanded", String(S.menuOpen)); btn.classList.toggle("udot", REL.state === "ready");
   var pref = themePref();
-  var key = !S.menuOpen ? "closed" : JSON.stringify([pref, S.tab, rfPushText(rfPushState(rfPushRead()), NaN, 0), S.rf.push.busy, S.rf.showNames, rfData().push.vapidKey ? 1 : 0, (rfData().push.on[DEV.deviceId] || {}).lastAlertAt || 0, activityOpenCount(S.requests), !!S.busy["list"], S.list, S.view, m ? NAMES.map(function (n) { var x = m.mstat[n]; return [x.exists, x.online, bridgeOk(x.version), x.bridgeVersion, Math.floor(x.lastSeen / 10000)]; }) : 0, REL.running, REL.page, REL.state]);
+  var key = !S.menuOpen ? "closed" : JSON.stringify([pref, S.tab, rfPushText(rfPushState(rfPushRead()), NaN, 0), S.rf.push.busy, S.rf.hideDetail, rfHideMismatch(rfData().push.on[DEV.deviceId]), rfHdState().failed, rfData().push.vapidKey ? 1 : 0, (rfData().push.on[DEV.deviceId] || {}).lastAlertAt || 0, activityOpenCount(S.requests), !!S.busy["list"], S.list, S.view, m ? NAMES.map(function (n) { var x = m.mstat[n]; return [x.exists, x.online, bridgeOk(x.version), x.bridgeVersion, Math.floor(x.lastSeen / 10000)]; }) : 0, REL.running, REL.page, REL.state]);
   var prev = host.getAttribute("data-key");
   if (prev === key) return;
   var opening = prev === null || prev === "closed", ae = document.activeElement;
@@ -5733,7 +5733,7 @@ function rfCheck() {
     if (x.st === "done") { delete S.rf.reqs[rid]; if (w.onDone) w.onDone(x.r); changed = true; }
     else if (x.st === "error") { fail = friendlyError(w.f.action, x.r.error || x.r.result || "unknown error"); }
     else if (now - w.at > 300000) fail = "No answer from your Mac in 5 minutes. Is it awake?";
-    if (fail !== null) { delete S.rf.reqs[rid]; if (w.onFail) w.onFail(fail); toast(fail); changed = true; }
+    if (fail !== null) { delete S.rf.reqs[rid]; if (w.onFail) w.onFail(fail); if (!w.silent) toast(fail); changed = true; }
   });
   var day = new Date(now).toDateString();
   Object.keys(S.rf.local).forEach(function (id) {
@@ -5757,9 +5757,11 @@ function rfCheck() {
   var sub = S.rf.push.sub, tgt = R.push.machine;
   if (rfResubNeeded({ subscribed: !!sub, known: R.known, vapidKey: R.push.vapidKey, listed: !!R.push.on[DEV.deviceId], busy: S.rf.push.busy, done: S.rf.push.resub, ageMs: now - S.rf.pageAt })) {
     S.rf.push.resub = true;
-    var j = sub.toJSON ? sub.toJSON() : {}, rf = rfPushSubFields({ endpoint: j.endpoint, p256dh: j.keys && j.keys.p256dh, auth: j.keys && j.keys.auth }, tgt);
+    var j = sub.toJSON ? sub.toJSON() : {}, rf = rfPushSubFields({ endpoint: j.endpoint, p256dh: j.keys && j.keys.p256dh, auth: j.keys && j.keys.auth }, tgt, S.rf.hideDetail === true);
     if (rf) rfSend(rf, {});
   }
+  // the box and the Mac disagree (the first send was lost or refused): send it again, at most once per 5 s (one per heartbeat), until the Mac's echo matches
+  rfHideSync(now, sub, tgt, R);
   if (changed) render(true);
 }
 /* ----- answers: held for 10 s so Undo is real (a sent answer cannot be unsent), flushed at once when the app is hidden ----- */
@@ -6354,7 +6356,37 @@ function rfPushRefresh() {
   rfSwReady().then(function (reg) { return reg.pushManager.getSubscription(); }).then(function (sub) { var had = !!S.rf.push.sub; S.rf.push.sub = sub; if (had !== !!sub) { renderMenu(); } }).catch(function () {});
 }
 function rfSwReady() { return Promise.race([navigator.serviceWorker.ready, new Promise(function (_, rej) { setTimeout(function () { rej(new Error("sw")); }, 8000); })]); }
-function rfPushPrefs() { try { rfSwReady().then(function (reg) { if (reg.active) reg.active.postMessage({ type: "push-prefs", showNames: S.rf.showNames === true }); }); } catch (e) {} }
+function rfPushPrefs() { try { rfSwReady().then(function (reg) { if (reg.active) reg.active.postMessage({ type: "push-prefs", hideDetail: S.rf.hideDetail === true }); }); } catch (e) {} }
+/** The Mac echoes the "hide details" value it stored for this device. null = an older Mac that does not echo it (nothing to compare). */
+function rfHideMismatch(mine) { return !!mine && typeof mine.hideDetail === "boolean" && mine.hideDetail !== (S.rf.hideDetail === true); }
+var RF_HD_BACKOFF = [5000, 30000, 120000];
+function rfHdState() { return S.rf.push.hd || (S.rf.push.hd = { tries: 0, at: 0, failed: false, pend: false }); }
+/** A subscribe for this device is already on its way (sent but not yet answered). */
+function rfSubPending() { return rfHdState().pend || Object.keys(S.rf.reqs).some(function (k) { return S.rf.reqs[k].f && S.rf.reqs[k].f.action === "push-subscribe"; }); }
+/** The box and the Mac's echo disagree: send again by itself (quietly, no toast) only while the Mac is online and nothing is pending, after 5 s, 30 s, 2 min; stop after 3 tries and let the person tap. Everything resets when the echo matches or the box changes. */
+function rfHideSync(now, sub, tgt, R) {
+  var ls = lsGet("mc-rf-hide"); if (ls === "1" || ls === "0") S.rf.hideDetail = ls === "1"; // REVIEW-alerts-3 L: another tab may have changed it; never ping-pong on a stale copy
+  var hd = rfHdState(), mine = R.push.on[DEV.deviceId];
+  if (!rfHideMismatch(mine)) { if (mine && typeof mine.hideDetail === "boolean") { hd.tries = 0; hd.at = 0; hd.failed = false; } return; }
+  if (!sub || !tgt || hd.failed) return;
+  var m = S.model && S.model.mstat && S.model.mstat[tgt];
+  if (!m || !m.online || S.rf.push.busy || rfSubPending()) return;
+  if (hd.tries >= RF_HD_BACKOFF.length) { if (now - hd.at > RF_HD_BACKOFF[RF_HD_BACKOFF.length - 1]) { hd.failed = true; renderMenu(); } return; }
+  if (now - hd.at > RF_HD_BACKOFF[hd.tries]) { hd.tries++; rfPushResend(true); }
+}
+/** After the "Hide details" box changes (or a tap on retry): tell the Mac again (the same signed push-subscribe, now carrying the choice) so the next alert follows it. `auto` = quiet (no toast on failure). */
+function rfPushResend(auto) {
+  var sub = S.rf.push.sub, tgt = rfData().push.machine, hd = rfHdState();
+  if (!sub || !tgt) return;
+  hd.at = Date.now();
+  var j = sub.toJSON ? sub.toJSON() : {}, f = rfPushSubFields({ endpoint: j.endpoint, p256dh: j.keys && j.keys.p256dh, auth: j.keys && j.keys.auth }, tgt, S.rf.hideDetail === true);
+  if (!f) return;
+  hd.pend = true;
+  var done = function () { hd.pend = false; };
+  rfSend(f, { silent: auto === true, onDone: done, onFail: done }).then(function (rid) { if (!rid) hd.pend = false; }, function () { hd.pend = false; });
+}
+/** The box changed or the person tapped retry: start the backoff over and send now. */
+function rfHideRestart() { var hd = rfHdState(); hd.tries = 0; hd.at = 0; hd.failed = false; rfPushResend(false); renderMenu(); }
 function rfPushOn() {
   var R = rfData(), key = R.push.vapidKey, tgt = R.push.machine;
   var state = rfPushState(rfPushRead());
@@ -6369,7 +6401,7 @@ function rfPushOn() {
     return rfSwReady();
   }).then(function (reg) { return reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: bytes }); })
     .then(function (sub) {
-      var j = sub.toJSON(), f = rfPushSubFields({ endpoint: j.endpoint, p256dh: j.keys && j.keys.p256dh, auth: j.keys && j.keys.auth }, tgt);
+      var j = sub.toJSON(), f = rfPushSubFields({ endpoint: j.endpoint, p256dh: j.keys && j.keys.p256dh, auth: j.keys && j.keys.auth }, tgt, S.rf.hideDetail === true);
       S.rf.push.sub = sub;
       if (!f) { sub.unsubscribe().catch(function () {}); S.rf.push.sub = null; throw new Error("endpoint"); }
       rfPushPrefs();
@@ -6396,9 +6428,13 @@ function rfPushRow() {
   if (st === "off") row.appendChild(h("button", { "class": "btn", type: "button", "data-k": "rf-notif-on", disabled: S.rf.push.busy ? "" : null, onclick: rfPushOn, text: S.rf.push.busy ? "Turning on…" : "Turn on" }));
   if (st === "on") {
     row.appendChild(h("button", { "class": "btn", type: "button", "data-k": "rf-notif-off", disabled: S.rf.push.busy ? "" : null, onclick: rfPushOff, text: "Turn off" }));
-    var cb = h("input", { type: "checkbox", "data-k": "rf-shownames", "aria-label": "Show project names on the lock screen" }); cb.checked = S.rf.showNames === true;
-    cb.addEventListener("change", function () { S.rf.showNames = cb.checked; lsSet("mc-rf-names", cb.checked ? "1" : "0"); rfPushPrefs(); });
-    row.appendChild(h("label", { "class": "rf-cb" }, cb, h("span", { text: "Show project names on the lock screen" })));
+    var cb = h("input", { type: "checkbox", "data-k": "rf-hidedetail", "aria-label": "Hide details on the lock screen" }); cb.checked = S.rf.hideDetail === true;
+    cb.addEventListener("change", function () { S.rf.hideDetail = cb.checked; lsSet("mc-rf-hide", cb.checked ? "1" : "0"); rfPushPrefs(); rfHideRestart(); });
+    row.appendChild(h("label", { "class": "rf-cb" }, cb, h("span", { text: "Hide details on the lock screen" })));
+    if (rfHideMismatch(mine)) {
+      if (rfHdState().failed) row.appendChild(h("button", { "class": "btn", type: "button", "data-k": "rf-hide-retry", onclick: rfHideRestart, text: "Couldn’t save — tap to retry" }));
+      else row.appendChild(h("div", { "class": "cap", "data-k": "rf-hide-saving", text: "Saving…" }));
+    }
   }
   return row;
 }
@@ -6419,7 +6455,7 @@ function rfBadgeSync() {
 }
 function rfInit() {
   S.rf.order = lsGet("mc-rf-order") === "area" ? "area" : "effort";
-  S.rf.showNames = lsGet("mc-rf-names") === "1";
+  S.rf.hideDetail = lsGet("mc-rf-hide") === "1";
   try { var st = JSON.parse(lsGet("mc-save-st-v1") || "{}"); if (st && typeof st === "object") S.rf.saveSt = st; } catch (e) {}
   var id = rfParseHash(location.hash); if (id) S.rf.deep = id;
   window.addEventListener("hashchange", function () { var x = rfParseHash(location.hash); if (x) rfDeepSet(x); });

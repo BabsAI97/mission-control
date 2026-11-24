@@ -107,20 +107,20 @@ function createWorker(env) {
 /* ---------- push (refocus 4g/5d). The browser decrypts the payload; nothing here is a trust decision, it only decides what the alert says. ---------- */
 var OFFLINE_TEXT = "Mission Control: Mac offline", PREFS_KEY = "__prefs";
 function oneLine(v, n) { return String(v == null ? "" : v).replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim().slice(0, n); }
-/** What a push shows. An empty payload is the relay's offline alert (fixed text). A decision shows the project name only when the "show project names" setting is on. */
-function pushView(raw, showNames) {
+/** What a push shows. An empty payload is the relay's offline alert (fixed text). A decision shows the title and body exactly as the Mac sent them (control characters out, length capped); whether to send detail is decided on the Mac by the "hide details" setting. */
+function pushView(raw) {
   var text = typeof raw === "string" ? raw : "", p = null;
   if (!text) return { title: OFFLINE_TEXT, body: "", id: "", badge: null, tag: "mc-offline" };
   try { p = JSON.parse(text); } catch (e) { p = null; }
   if (!p || typeof p !== "object" || p.t !== "decision") return { title: "Mission Control", body: "Open Mission Control", id: "", badge: null, tag: "mc" };
-  var id = /^[0-9a-f]{32}$/.test(String(p.id)) ? p.id : "", b = Math.floor(Number(p.badge)), title = oneLine(p.title, 80);
-  return { title: showNames === true && title ? title : "A decision needs you", body: oneLine(p.body, 100) || "Open Mission Control", id: id, badge: isFinite(b) && b >= 0 ? Math.min(b, 99) : null, tag: id ? "mc-" + id : "mc" };
+  var id = /^[0-9a-f]{32}$/.test(String(p.id)) ? p.id : "", b = Math.floor(Number(p.badge)), title = oneLine(p.title, 100);
+  return { title: title || "A decision needs you", body: oneLine(p.body, 180) || "Open Mission Control", id: id, badge: isFinite(b) && b >= 0 ? Math.min(b, 99) : null, tag: id ? "mc-" + id : "mc" };
 }
 async function loadPrefs(caches, scope) {
   try { var m = await caches.open(META), r = await m.match(new URL(PREFS_KEY, scope).href); return r ? JSON.parse(await r.text()) === true : false; } catch (e) { return false; }
 }
-async function savePrefs(caches, scope, showNames) {
-  var m = await caches.open(META); await m.put(new URL(PREFS_KEY, scope).href, new Response(JSON.stringify(showNames === true)));
+async function savePrefs(caches, scope, hideDetail) {
+  var m = await caches.open(META); await m.put(new URL(PREFS_KEY, scope).href, new Response(JSON.stringify(hideDetail === true)));
 }
 /** Where a tapped alert goes: an open window of this app (told which decision) or a new one at #d=<id>. */
 async function openFromAlert(clientsApi, scope, id) {
@@ -143,13 +143,13 @@ if (typeof self !== "undefined" && self.addEventListener && typeof self.skipWait
     var d = e.data, src = e.source;
     if (!src || !d || typeof d !== "object") return; // only a page of this origin has a source
     if (d.type === "status") e.waitUntil(W.cachedRelease().then(function (r) { src.postMessage({ type: "status", v: r ? r.v : 0 }); }));
-    if (d.type === "push-prefs") e.waitUntil(savePrefs(self.caches, self.registration.scope, d.showNames === true));
+    if (d.type === "push-prefs") e.waitUntil(savePrefs(self.caches, self.registration.scope, d.hideDetail === true));
     if (d.type === "apply-release") e.waitUntil(W.applyRelease(d.release).then(function (r) { src.postMessage({ type: "release-result", ok: r.ok, v: r.v, reason: r.reason || "" }); }));
   });
   self.addEventListener("push", function (e) {
     e.waitUntil((async function () {
       var raw = ""; try { raw = e.data ? await e.data.text() : ""; } catch (x) {}
-      var v = pushView(raw, await loadPrefs(self.caches, self.registration.scope));
+      var v = pushView(raw);
       try { if (v.badge !== null && self.navigator) { if (v.badge > 0 && self.navigator.setAppBadge) await self.navigator.setAppBadge(v.badge); else if (v.badge === 0 && self.navigator.clearAppBadge) await self.navigator.clearAppBadge(); } } catch (x) {}
       await self.registration.showNotification(v.title, { body: v.body, tag: v.tag, data: { id: v.id } });
     })());
