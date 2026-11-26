@@ -36,7 +36,7 @@ var S = {
   rf: { sweep: { busy: false, at: 0 }, sel: Object.create(null), oth: Object.create(null), noneOpen: false, order: "effort", sheet: null, opener: null, local: Object.create(null), undone: Object.create(null), hold: Object.create(null), reqs: Object.create(null), vals: Object.create(null), checks: Object.create(null), askPend: Object.create(null), jobAsks: Object.create(null), overlay: Object.create(null), saveSt: Object.create(null), snz: false, confirm: "", gate: "", gateAns: null, gateSel: Object.create(null), gateBusy: false, deep: "", badge: -1, pageAt: Date.now(), sessMode: "home", saveFilter: "all", hideDetail: false, push: { sub: null, busy: false }, stack: { all: false, seen: Object.create(null), busy: Object.create(null), last: null } },
   tab: "decide", filter: "all", query: "", pins: Object.create(null), readAt: Object.create(null), readBase: NaN, queue: [], qTimer: 0, sendWatch: Object.create(null), reqWatch: Object.create(null),
   schedules: { Mac: undefined, PC: undefined }, saveOpen: null, actExp: null, swiping: false, openRow: null, hint: true, needsMap: Object.create(null), unreadMap: Object.create(null), todayData: null,
-  assistInfo: null, assistAbout: "", assistDraft: "", assistLocal: [], assistSentAt: 0, assistAiAtSend: 0, assistLast: null, assistReq: null, cardState: Object.create(null), pairWatch: null,
+  assistInfo: null, assistAbout: "", assistDraft: "", assistLocal: [], assistSend: null, assistSentAt: 0, assistAiAtSend: 0, assistLast: null, assistReq: null, cardState: Object.create(null), pairWatch: null,
   sig: Object.create(null), manifest: Object.create(null), docHash: Object.create(null), docAt: Object.create(null), mine: Object.create(null), ownSig: Object.create(null), hbNewest: Object.create(null), docMachine: Object.create(null), peekMin: Object.create(null), sigSeq: Object.create(null), ing: Object.create(null), rawReqs: [], reqVer: Object.create(null), pairDocs: { Mac: null, PC: null },
   gn: { Mac: undefined, PC: undefined }, agents: { Mac: undefined, PC: undefined }, apData: null,
   ap: { seg: "tonight", sel: { tonight: null, agents: null, results: null }, dec: Object.create(null), note: "", noteOpen: false, q: "" },
@@ -1233,6 +1233,7 @@ function queueRestore(q, drafts) {
 function sendOutcome(r) {
   if (!r || r.action !== "send" || r.status !== "done") return "";
   var m = str(r.result).match(/\(delivery:\s*\w+/g);
+  if (!m) { var bare = /^\s*(delivered|queued)\s*$/i.exec(str(r.result)); m = bare ? ["(delivery: " + bare[1].toLowerCase()] : null; } // the bridge writes the bare word (result: "delivered"); the old "(delivery: ...)" form still counts
   if (!m) return "";
   var last = m[m.length - 1];
   return /queued/.test(last) ? "Queued — Claude will read it after the current step" : /delivered/.test(last) ? "Delivered" : "";
@@ -1461,7 +1462,7 @@ function bridgeOk(v) { return /^0\.[3-9](\.\d+)?$/.test(String(v)); }
 /* @pure-end */
 /* @pure-start */
 /* ---------- v8.3: Assistant (contract v0.9) and device pairing helpers ---------- */
-var ASSIST_EVERY_MS = 3000, ASSIST_MAX_ITEMS = 50, ACTION_TYPES = ["archive", "send", "start", "handoff"], ACTION_TEXT_MAX = 4000, ASSIST_LOCAL_MS = 60000, ASSIST_TYPING_MS = 20000;
+var ASSIST_EVERY_MS = 3000, ASSIST_MAX_ITEMS = 50, ACTION_TYPES = ["archive", "send", "start", "handoff"], ACTION_TEXT_MAX = 4000, ASSIST_LOCAL_MS = 60000, ASSIST_WAIT_MS = 180000, ASSIST_FAST_MS = 2000; // wait for a reply up to 3 min; re-peek every 2 s meanwhile
 var ASSIST_PREFIX = "[From the Mission Control app]";
 /** heartbeat `assistant: { id, isRunning }`; the id must look like a session id or it is dropped. */
 function cleanAssistant(a) {
@@ -1480,10 +1481,38 @@ function assistantInfo(mstat) {
   });
   return ready || offline || { state: "notsetup", id: "", machine: "", running: false };
 }
-/** Peek for the assistant: only while its tab is open and visible, the computer is online, nothing in flight, every 3 s. */
+/** Peek for the assistant: only while its tab is open and visible, the computer is online, nothing in flight; every 3 s, or every 2 s while a sent message waits for its reply (o.waiting). */
 function assistGate(o) {
   if (!/^local_[0-9a-f-]{36}$/.test(str(o.id)) || !o.open || !o.visible || !o.online || o.inFlight) return false;
-  return o.lastAt == null || o.now - o.lastAt >= ASSIST_EVERY_MS;
+  return o.lastAt == null || o.now - o.lastAt >= (o.waiting ? ASSIST_FAST_MS : ASSIST_EVERY_MS);
+}
+/** Is a message sent from this tab still waiting for its answer? send = { at, failed }; stops when it failed, a reply arrived or 3 min passed. */
+function assistWaiting(send, replied, now) { return !!send && !send.failed && !replied && now - send.at < ASSIST_WAIT_MS; }
+/** Has the assistant answered? doneAt = the bridge's own time on the request when it finished delivering (ms). The answer is in when a peek doc written AFTER that (the doc's own `at`, same bridge clock) ends with an assistant item: that doc already holds our message, so a last assistant item is new. A peek written before delivery, a failed peek, or one ending in tool calls never counts. No counts and no text are compared. */
+function assistReplied(view, doneAt) {
+  if (!view || view.status !== "ok" || !isFinite(doneAt) || !isFinite(view.at) || view.at <= doneAt) return false;
+  var items = view.items || [], last = items[items.length - 1];
+  return !!last && last.kind === "assistant";
+}
+/** The words under your latest Assistant bubble. send = { rid, failed, queued, yes, at, errAt, deliveredAt }; x = reqState of the send (null before it has a request); o = { relayReady, replied, now }. st: queued | sending | claimed | yes | delivered | slow | unconfirmed | noreply | replied (nothing to show) | failed. Retry ONLY for a definite failure (the Mac never claimed it); every unclear state says "Not confirmed" and offers no Retry. */
+var ASSIST_UNSURE = "Not confirmed. Check the reply below before sending again";
+function assistSendStatus(send, x, o) {
+  if (!send) return { st: "", word: "", retry: false };
+  if (o.replied && (send.rid || send.yes)) return { st: "replied", word: "", retry: false }; // the answer is in the log: whatever the request said
+  if (send.yes) return o.now - send.at >= ASSIST_WAIT_MS ? { st: "", word: "", retry: false } : { st: "yes", word: "Waiting for your yes", retry: false };
+  if (!send.rid) {
+    if (send.failed) return { st: "failed", word: "Not sent", retry: true }; // the relay write failed: nothing left this phone
+    return send.queued || !o.relayReady ? { st: "queued", word: send.queued ? "Queued" : "Queued \u2014 waiting for connection", retry: false } : { st: "sending", word: "Sending\u2026", retry: false };
+  }
+  if (send.failed) return { st: "unconfirmed", word: ASSIST_UNSURE, retry: false }; // lost ack, then cancelled: it may have landed
+  if (x && x.st === "error") {
+    var err = str(x.r && x.r.error), claimed = !!(x.r && x.r.claimedAt);
+    if (!claimed && !/may still complete|timed out/i.test(err)) return { st: "failed", word: "Not delivered", retry: true }; // refused or expired before the Mac claimed it
+    return /may still complete|timed out/i.test(err) && o.now - (send.errAt || o.now) < ASSIST_WAIT_MS ? { st: "slow", word: "Taking longer \u00b7 check shortly", retry: false } : { st: "unconfirmed", word: ASSIST_UNSURE, retry: false };
+  }
+  if (x && x.st === "done") return o.now - (send.deliveredAt || o.now) >= ASSIST_WAIT_MS ? { st: "noreply", word: "No reply yet", retry: false } : { st: "delivered", word: "Delivered", retry: false };
+  if (o.now - send.at >= ASSIST_WAIT_MS) return { st: "unconfirmed", word: ASSIST_UNSURE, retry: false }; // claimed (or never picked up) for 3 min with no result
+  return x && x.st === "working" ? { st: "claimed", word: "On your Mac", retry: false } : { st: "sending", word: "Sending\u2026", retry: false };
 }
 /** Short stable hash of a string (djb2, base 36): keys an action card by what it says, not where it sits. */
 function strHash(t) { var h = 5381, x = str(t); for (var i = 0; i < x.length; i++) h = ((h << 5) + h + x.charCodeAt(i)) | 0; return (h >>> 0).toString(36); }
@@ -1541,15 +1570,15 @@ function mergeChat(items, local, now) {
   });
   var recent = users.slice(-8);
   (Array.isArray(local) ? local : []).forEach(function (l) {
-    if (now - l.at > ASSIST_LOCAL_MS || recent.indexOf(str(l.text).trim()) >= 0) return;
+    if ((now - l.at > ASSIST_LOCAL_MS && !l.hold) || recent.indexOf(str(l.text).trim()) >= 0) return;
     out.push({ w: "me", text: l.text, about: l.about || "", local: true, queued: !!l.queued });
   });
   return out;
 }
-/** "typing…": the assistant session is running, or we sent something under 20 s ago and no new assistant message has arrived. */
+/** "typing…": the assistant session is running, or our message was delivered (o.deliveredAt) and no reply has arrived yet, for at most 3 min. */
 function assistantTyping(o) {
   if (o.running) return true;
-  return !!o.sentAt && o.now - o.sentAt < ASSIST_TYPING_MS && o.aiNow <= o.aiAtSend;
+  return !!o.deliveredAt && !o.replied && o.now - o.deliveredAt < ASSIST_WAIT_MS;
 }
 /** The start request that sets the assistant up (fixed title; the bridge owns the read-only brief). */
 function assistSetupFields(target) { return { action: "start", target: target, title: "MC Assistant", prompt: "Set up the Mission Control assistant session.", project: null, kind: "assistant", ttlSec: START_TTL_SEC }; }
@@ -3034,7 +3063,7 @@ function checkUnknown() {
     else if (v === "ask" && !S.ask) {
       u.asked = true; render(true);
       S.ask = { title: "It didn\u2019t arrive. Send again?", okLabel: "Send again", body: "The relay never confirmed this request and it is not there. Sending again uses the same request id, so it cannot run twice.",
-        onCancel: function () { delete S.unknown[id]; render(true); },
+        onCancel: function () { delete S.unknown[id]; if (S.assistSend && S.assistSend.rid === id) S.assistSend.failed = true; render(true); },
         ok: function () { delete S.unknown[id]; createRequest(u.f, { id: u.id, body: u.body, resend: u.signed }).then(function (r) { if (r) toast("Sent."); }); } };
       renderDialog();
     }
@@ -3045,13 +3074,20 @@ function setBusy(key, on) { if (on) S.busy[key] = 1; else delete S.busy[key]; re
 function guarded(key, fn) {
   return once(key, async function () { setBusy(key, true); try { return await fn(); } finally { setBusy(key, false); } });
 }
-async function doSend(s, text, queued, about, quiet) {
+async function doSend(s, text, queued, about, quiet, lkey) {
   var t = str(text).trim();
   if (!t) return;
   var gdS = typeof rfGatedDecFor === "function" ? rfGatedDecFor(s.id, "", s.machine) : null;
-  if (gdS) { rfReplyViaYes(s.id, s.machine, t, false, gdS); return; } // fallback: the check in askSend normally catches this first
+  var asst = !!(lkey && S.assistSend && S.assistSend.key === lkey && S.assistInfo && S.assistInfo.id === s.id); // the Assistant bubble's status line follows this send
+  if (asst) S.assistSend.queued = false;
+  if (gdS) { if (asst) S.assistSend.yes = true; rfReplyViaYes(s.id, s.machine, t, false, gdS); return; } // fallback: the check in askSend normally catches this first
   var r = await guarded("send:" + s.id, function () { return createRequest(sendFields(s.id, t, S.machines, about, about !== undefined && S.assistInfo && S.assistInfo.id === s.id ? S.assistInfo.machine : "")); });
-  if (r === undefined) return;
+  if (r === undefined) { if (asst && S.assistSend && S.assistSend.key === lkey) S.assistSend.failed = true; return; } // another send is still going out: this one was never written, so "Not sent" + Retry
+  if (asst && S.assistSend && S.assistSend.key === lkey) {
+    if (r) S.assistSend.rid = r;
+    else if (S.reqUnknown) { var u = Object.keys(S.unknown).map(function (k) { return S.unknown[k]; }).filter(function (x) { return x.f && x.f.action === "send" && x.f.sessionId === s.id; }).sort(function (a, b) { return b.at - a.at; })[0]; if (u) S.assistSend.rid = u.id; else S.assistSend.failed = true; } // not sure it arrived: follow that request
+    else S.assistSend.failed = true;
+  }
   if (r) {
     watchSend(r);
     if (typeof sentAdd === "function" && s.id !== (S.assistInfo && S.assistInfo.id)) sentAdd(s.id, t, r); // v17: shown in the chat at once, with Sending / Delivered / Claude is working
@@ -3640,7 +3676,7 @@ function queueReply(s, t, about, lkey) {
   if (!S.qTimer) S.qTimer = setInterval(queueTick, 500);
   var e = S.queue[S.queue.length - 1];
   toast("Queued \u00b7 \u201c" + s.title.slice(0, 40) + "\u201d", { undo: function () {
-    S.queue = queueUndo(S.queue, e.key); S.assistLocal = S.assistLocal.filter(function (l) { return l.key !== e.key; });
+    S.queue = queueUndo(S.queue, e.key); S.assistLocal = S.assistLocal.filter(function (l) { return l.key !== e.key; }); if (S.assistSend && S.assistSend.key === e.key) S.assistSend = null;
     if (S.assistInfo && S.assistInfo.id === e.sid) { S.assistDraft = S.assistDraft || e.text; render(true); } else if (!S.drafts[e.sid]) S.drafts[e.sid] = e.text;
     var box = S.focus === e.sid ? document.querySelector('[data-k="freply"]') : null; if (box && !box.value) box.value = e.text;
     toast("Message not sent. It is back in the reply box.");
@@ -3655,7 +3691,7 @@ function queueTick() {
       var s = sessionFor(e.sid);
       if (!s) toast("Not sent: that session is no longer listed.");
       else if (S.busy["send:" + e.sid]) S.queue.unshift(e); // the previous message for this session is still going out: wait
-      else doSend(s, e.text, true, e.about || undefined, !!(S.assistInfo && S.assistInfo.id === e.sid));
+      else doSend(s, e.text, true, e.about || undefined, !!(S.assistInfo && S.assistInfo.id === e.sid), e.key);
     });
   }
   if (!S.queue.length) { clearInterval(S.qTimer); S.qTimer = 0; }
@@ -3664,7 +3700,7 @@ function queueTick() {
 /** The page is hidden (tab switch, lock, close): queued messages go back to their reply boxes and are kept on this phone; nothing is sent silently. */
 function parkQueue() {
   if (!S.queue.length) return;
-  S.drafts = queueRestore(S.queue, S.drafts); S.queue = []; S.parked = true;
+  S.drafts = queueRestore(S.queue, S.drafts); S.queue.forEach(function (q) { S.assistLocal = S.assistLocal.filter(function (l) { return l.key !== q.key; }); if (S.assistSend && S.assistSend.key === q.key) S.assistSend = null; }); S.queue = []; S.parked = true;
   lsSet("mc-drafts-v1", JSON.stringify(S.drafts));
   var box = S.focus ? document.querySelector('[data-k="freply"]') : null; if (box && S.drafts[S.focus]) box.value = S.drafts[S.focus];
   renderQueue();
@@ -3710,7 +3746,7 @@ function checkSendWatch() {
     if (r && (r.status === "done" || r.status === "error")) {
       delete S.sendWatch[rid];
       if (r.status === "error" && sendNeedsYes(r)) { /* the Mac wants a yes screen first: keep the words, show nothing raw */ }
-      else if (r.status === "error") toast("Reply not delivered: " + str(r.error || "unknown error")); else { var o = sendOutcome(r); if (o) toast(o); }
+      else if (r.status === "error") toast("Reply not delivered: " + str(r.error || "unknown error")); else { var o = sendOutcome(r); if (o && !(S.assistInfo && r.sessionId === S.assistInfo.id)) toast(o); } // the Assistant tab shows its own status line
     } else if (Date.now() - S.sendWatch[rid] > 300000) delete S.sendWatch[rid];
   });
 }
@@ -3728,6 +3764,7 @@ function sentEntries(sid) {
 function sentFor(sid, view) { var s = S.byId[sid]; return sentItems(sentEntries(sid), view && view.status === "ok" ? view.items : [], !!(s && s.status === "running"), Date.now()); }
 /** Every tick: a message whose request just finished makes the open chat peek again at once (the 20 s timer is not waited for). */
 function sentTick() {
+  if (typeof assistSendTick === "function") assistSendTick();
   Object.keys(S.sent).forEach(function (sid) {
     (S.sent[sid] || []).forEach(function (e) {
       if (e.repeeked) return;
@@ -3755,12 +3792,36 @@ function goAsk(id) {
   setTimeout(function () { var t = document.querySelector('[data-k="chat-in"]'); if (t) t.focus(); }, 50);
 }
 function assistItems() { var v = S.assistInfo && S.peek[S.assistInfo.id]; return v && v.status === "ok" ? v.items : []; }
-function assistChat() { return mergeChat(assistItems(), S.assistLocal, Date.now()); }
+function assistChat() {
+  var a = S.assistSend, hold = !!a && /^(queued|sending|claimed|yes|slow|unconfirmed|failed)$/.test(assistStatus().st); // an unconfirmed message stays on screen (the 60 s drop is for delivered ones)
+  return mergeChat(assistItems(), hold ? S.assistLocal.map(function (l) { return l.key === a.key ? Object.assign({}, l, { hold: true }) : l; }) : S.assistLocal, Date.now());
+}
 function aiCount() { return assistItems().filter(function (i) { return i.kind === "assistant"; }).length; }
-function assistTyping() { var a = S.assistInfo; return !!a && a.state === "ready" && assistantTyping({ running: a.running, sentAt: S.assistSentAt, aiAtSend: S.assistAiAtSend, aiNow: aiCount(), now: Date.now() }); }
+function assistReply() { var a = S.assistSend; return !!a && assistReplied(S.assistInfo && S.peek[S.assistInfo.id], a.doneAt); }
+function assistStatus() { var a = S.assistSend; return assistSendStatus(a, a && a.rid ? reqState(a.rid) : null, { relayReady: S.relay === "ready", replied: assistReply(), now: Date.now() }); }
+function assistTyping() { var a = S.assistInfo, d = S.assistSend; return !!a && a.state === "ready" && assistantTyping({ running: a.running, deliveredAt: d && !d.failed ? d.deliveredAt : 0, replied: assistReply(), now: Date.now() }); }
+/** Every tick: note when the send was delivered (the typing dots start) or ended in an error, and look at the chat again at once (a fresh peek, never a second one while one is in flight). */
+function assistSendTick() {
+  var a = S.assistSend; if (!a) return;
+  if (!a.rid) return;
+  var x = reqState(a.rid);
+  if (a.failed && x.st === "done") a.failed = false; // a cancelled lost-ack send that turned out to land
+  if (x.st === "done" && !a.deliveredAt) { a.deliveredAt = Date.now(); a.doneAt = x.r ? Date.parse(x.r.doneAt) : NaN; S.assistLast = null; } // doneAt is the bridge's clock, the same one the peek doc's `at` uses
+  else if (x.st === "error" && !a.errAt) { a.errAt = Date.now(); S.assistLast = null; }
+}
+/** Retry = the normal signed send again (new request id) with the same words; only by tapping Retry. */
+function assistRetry() {
+  var a = S.assistSend, s = assistSession(); if (!a || !s) return;
+  if (!s.online) { toast("The assistant is offline."); return; }
+  var now = Date.now();
+  a.failed = false; a.yes = false; a.rid = ""; a.deliveredAt = 0; a.errAt = 0; a.queued = false; a.at = now; a.doneAt = NaN;
+  var l = S.assistLocal.filter(function (x) { return x.key === a.key; })[0];
+  if (l) l.at = now; else S.assistLocal.push({ key: a.key, text: a.text, about: a.about, at: now, queued: false });
+  doSend(s, a.text, true, a.about, true, a.key); render(true);
+}
 function assistantKey(model) {
   var a = S.assistInfo = assistantInfo(model.mstat), items = assistItems(), last = items.length ? items[items.length - 1] : null, g = startGate(model.mstat);
-  return JSON.stringify([a, items.length, last && last.text.length, last && last.text.slice(-20), S.assistLocal.map(function (l) { return [l.key, l.queued]; }), S.assistAbout, assistTyping(), S.cardState, S.queue.length, g.ok, g.reason, !!S.db]);
+  return JSON.stringify([a, items.length, last && last.text.length, last && last.text.slice(-20), S.assistLocal.map(function (l) { return [l.key, l.queued]; }), S.assistAbout, assistTyping(), assistStatus().word,  S.cardState, S.queue.length, g.ok, g.reason, !!S.db]);
 }
 var assistUnsub = null, assistSubId = "";
 function ensureAssistSub(id) {
@@ -3771,10 +3832,11 @@ function ensureAssistSub(id) {
 }
 function assistTick() {
   var info = S.assistInfo;
+  assistSendTick();
   if (S.tab !== "assistant" || !S.db || !info || info.state === "notsetup") return;
   ensureAssistSub(info.id);
   var now = Date.now();
-  if (!assistGate({ id: info.id, open: true, visible: document.visibilityState !== "hidden", online: info.state === "ready", inFlight: peekInFlight(S.requests, info.id, S.assistReq, now), lastAt: S.assistLast == null ? null : S.assistLast, now: now })) return;
+  if (!assistGate({ id: info.id, open: true, visible: document.visibilityState !== "hidden", online: info.state === "ready", inFlight: peekInFlight(S.requests, info.id, S.assistReq, now), lastAt: S.assistLast == null ? null : S.assistLast, waiting: assistWaiting(S.assistSend, assistReply(), now), now: now })) return;
   S.assistLast = now;
   var rid = newId(), f = peekFields(info.id, S.machines); f.target = info.machine;
   S.assistReq = { id: rid, at: now };
@@ -3797,13 +3859,18 @@ function assistantNode(model) {
   if (unpaired) w.appendChild(h("div", { "class": "banner", role: "status", style: "margin:0 0 12px", text: "Pair this device first to message the assistant." }));
   var msgs = h("div", { "class": "msgs", role: "log", "aria-label": "Conversation with the assistant", "aria-live": "polite" }), known = knownIds(), chat = assistChat();
   if (!chat.length) msgs.appendChild(h("div", { "class": "cap", style: "text-align:center;padding:24px 0", text: "Ask about a session or about today. Add a session under “About” to attach it." }));
+  var lastMe = -1, ast = assistStatus();
+  chat.forEach(function (m, i) { if (m.w === "me") lastMe = i; });
+  if (lastMe >= 0 && (!S.assistSend || chat[lastMe].text.trim() !== S.assistSend.text.trim() || !ast.word)) lastMe = -1;
   chat.forEach(function (m, i) {
     if (m.w === "tools") { msgs.appendChild(h("div", { "class": "tool", text: m.text })); return; }
     if (m.w === "me") {
       var b = h("div", { "class": "cm me" }, h("span", { text: m.text }));
       if (m.about) b.appendChild(h("span", { "class": "qd", text: "About: " + ((S.byId[m.about] && S.byId[m.about].title) || "a session") }));
-      if (m.queued) b.appendChild(h("span", { "class": "qd", text: "Queued" }));
-      msgs.appendChild(b); return;
+      if (m.queued && i !== lastMe) b.appendChild(h("span", { "class": "qd", text: "Queued" }));
+      msgs.appendChild(b);
+      if (i === lastMe) msgs.appendChild(h("div", { "class": "cap", role: "status", "data-k": "assist-status", style: "align-self:flex-end;padding:0 12px;text-align:right" + (ast.st === "failed" ? ";color:var(--bad)" : ""), text: ast.word }, ast.retry ? h("button", { "class": "btn link", type: "button", "data-k": "assist-retry", onclick: assistRetry, text: " Retry" }) : null));
+      return;
     }
     splitAssistant(m.text, known).forEach(function (bl, j) {
       if (bl.kind === "text") msgs.appendChild(h("div", { "class": "cm ai" }, h("span", { text: bl.text })));
@@ -3837,7 +3904,8 @@ function sendAssist(text) {
   var about = S.assistAbout, key = newId(), running = s.status === "running";
   S.assistAbout = ""; S.assistSentAt = Date.now(); S.assistAiAtSend = aiCount();
   S.assistLocal.push({ key: key, text: text, about: about, at: Date.now(), queued: running });
-  if (running) queueReply(s, text, about, key); else doSend(s, text, true, about, true);
+  S.assistSend = { key: key, text: text, about: about, at: Date.now(), rid: "", failed: false, queued: running, deliveredAt: 0, errAt: 0, doneAt: NaN };
+  if (running) queueReply(s, text, about, key); else doSend(s, text, true, about, true, key);
   render(true);
 }
 /** Card state is kept on this device so a done or closed card stays that way after a reload. */
