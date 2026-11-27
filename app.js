@@ -34,7 +34,7 @@ var S = {
   sk: { done: Object.create(null) }, ask: null, actOpen: false, savesOpen: false, saveSel: null, saveFocus: null, bannerOff: NaN, toastMsg: "",
   dragging: false, dirty: false, pinching: false, suppressUntil: 0, lastSig: "",
   rf: { sweep: { busy: false, at: 0 }, sel: Object.create(null), oth: Object.create(null), noneOpen: false, order: "effort", sheet: null, opener: null, local: Object.create(null), undone: Object.create(null), hold: Object.create(null), reqs: Object.create(null), vals: Object.create(null), checks: Object.create(null), askPend: Object.create(null), jobAsks: Object.create(null), overlay: Object.create(null), saveSt: Object.create(null), snz: false, confirm: "", gate: "", gateAns: null, gateSel: Object.create(null), gateBusy: false, deep: "", badge: -1, pageAt: Date.now(), sessMode: "home", saveFilter: "all", hideDetail: false, push: { sub: null, busy: false }, stack: { all: false, seen: Object.create(null), busy: Object.create(null), last: null } },
-  tab: "decide", filter: "all", query: "", pins: Object.create(null), readAt: Object.create(null), readBase: NaN, queue: [], qTimer: 0, sendWatch: Object.create(null), reqWatch: Object.create(null),
+  tab: "now", v21: { st: "all", pj: "all", log: "all", more: 60 }, filter: "all", query: "", pins: Object.create(null), readAt: Object.create(null), readBase: NaN, queue: [], qTimer: 0, sendWatch: Object.create(null), reqWatch: Object.create(null),
   schedules: { Mac: undefined, PC: undefined }, saveOpen: null, actExp: null, swiping: false, openRow: null, hint: true, needsMap: Object.create(null), unreadMap: Object.create(null), todayData: null,
   assistInfo: null, assistAbout: "", assistDraft: "", assistLocal: [], assistSend: null, assistSentAt: 0, assistAiAtSend: 0, assistLast: null, assistReq: null, cardState: Object.create(null), pairWatch: null,
   sig: Object.create(null), manifest: Object.create(null), docHash: Object.create(null), docAt: Object.create(null), mine: Object.create(null), ownSig: Object.create(null), hbNewest: Object.create(null), docMachine: Object.create(null), peekMin: Object.create(null), sigSeq: Object.create(null), ing: Object.create(null), rawReqs: [], reqVer: Object.create(null), pairDocs: { Mac: null, PC: null },
@@ -392,13 +392,15 @@ function toast(msg, o) {
     el.classList.add("out"); setTimeout(function () { el.remove(); }, 300);
   }
   if (opt.undo) el.appendChild(h("button", { "class": "btn", type: "button", "aria-label": "Undo", onclick: function () { kill(true, false); opt.undo(); }, text: "Undo" }));
+  var openT = !opt.undo && !opt.action && typeof v21OpenTarget === "function" ? v21OpenTarget(opt.open) : null;
+  if (openT) el.appendChild(h("button", { "class": "btn", type: "button", "data-k": "toast-open", "aria-label": "Open", onclick: function () { kill(true, false); v21Go(openT); }, text: "Open" }));
   if (opt.action && !opt.undo) el.appendChild(h("button", { "class": "btn", type: "button", onclick: function () { kill(true, false); opt.action.fn(); }, text: opt.action.label }));
   el.appendChild(h("button", { "class": "btn tx", type: "button", "aria-label": "Dismiss message", onclick: function () { kill(false, false); }, text: "\u2715" }));
   el.addEventListener("touchstart", function (e) { y0 = e.touches[0].clientY; }, { passive: true });
   el.addEventListener("touchmove", function (e) { if (y0 !== null && e.touches[0].clientY - y0 > 24) { y0 = null; kill(false, false); } }, { passive: true });
   clear(host); host.appendChild(el);
   TOAST = { el: el, kill: kill, undo: !!opt.undo };
-  timer = setTimeout(function () { kill(false, false); }, opt.ms || (opt.undo ? 5000 : opt.action ? 8000 : 3000));
+  timer = setTimeout(function () { kill(false, false); }, opt.ms || (opt.undo ? 5000 : opt.action || openT ? 8000 : 3000));
 }
 function hideToast() { if (TOAST) TOAST.kill(true, false); }
 function newId() { return "r_" + Date.now() + "_" + Math.random().toString(36).slice(2, 8); }
@@ -2249,7 +2251,7 @@ function macNow(m, relay) {
 /** Every confirm sheet's words (the mock's, verbatim). kind: run | arch | reload | ans. (A your-turn reply has no confirm sheet, as in the mock.) */
 function quickConfirm(kind, o) {
   o = o || {};
-  if (kind === "run") return { title: "Start " + o.name + " on the Mac?", body: o.desc + " Opens as a new chat; you'll see it in Sessions.", ok: "Start" };
+  if (kind === "run") return { title: "Start " + o.name + " on the Mac?", body: o.desc + " Opens as a new chat; you'll see it in Chats.", ok: "Start" };
   if (kind === "arch") return { title: "Archive " + o.n + " chat" + (o.n === 1 ? "" : "s") + "?", body: "Archive only, never delete. You can restore them with Undo, or later from Activity.", ok: "Archive" };
   if (kind === "reload") return { title: "Reload bridge settings?", body: "The Mac re-reads its settings file. Takes about 5 seconds.", ok: "Reload" };
   if (kind === "ans") return { title: "Send this answer?", body: "The Mac stops the question in \"" + o.title + "\" and sends your text as the next message. The chat sees it came from Mission Control.", ok: "Send" };
@@ -2494,7 +2496,7 @@ function tidyResult(r, sent) {
 }
 /** "Done: 3 moved, 2 archived" (mock), plus the skipped ones named. Without a readable result no counts are claimed. */
 function tidyDoneText(sent, res) {
-  if (!res || !res.known) return "Applied. See Sessions for what changed.";
+  if (!res || !res.known) return "Applied. See Chats for what changed.";
   var moved = 0, arch = 0, skip = [];
   (sent || []).forEach(function (i) { var x = res.items[i.sessionId]; if (!x) return; if (x.ok) { if (i.dest.kind === "archive") arch++; else moved++; } else skip.push(archiveSkipWord(x.why)); });
   var t = "Done: " + moved + " moved, " + arch + " archived";
@@ -3092,7 +3094,7 @@ async function doSend(s, text, queued, about, quiet, lkey) {
     watchSend(r);
     if (typeof sentAdd === "function" && s.id !== (S.assistInfo && S.assistInfo.id)) sentAdd(s.id, t, r); // v17: shown in the chat at once, with Sending / Delivered / Claude is working
     if (!queued) { S.drafts[s.id] = ""; var box = S.focus === s.id ? document.querySelector('[data-k="freply"]') : null; if (box) box.value = ""; }
-    render(true); if (!quiet) toast("Reply requested. See Activity for what happened.");
+    render(true); if (!quiet) toast("Reply requested. See Log for what happened.", { open: "activity" });
   }
   if (!queued) focusReply(s.id); // success or fail: keep the keyboard where the user was typing
 }
@@ -3114,7 +3116,7 @@ async function doArchive(ids, confirmed) {
   if (!n && !failed && why === "already being sent") return; // a duplicate tap: the first call finishes the job
   if (failed && !n && ids.length === 1) { toast(S.reqUnknown ? "Archive: " + S.reqErr + "." : "Not archived: " + (S.reqErr || "the request could not be sent") + ". Try again."); return; }
   render(true);
-  if (n) toast("Archive requested for " + plural(n, "session", "sessions") + ". See Activity.");
+  if (n) toast("Archive requested for " + plural(n, "session", "sessions") + ". See Log.", { open: "activity" });
   else if (!failed) toast("Nothing archived (" + (why || "no session to archive") + ").");
 }
 async function doRefresh(silent) {
@@ -3143,6 +3145,10 @@ function radiusFor(n) { return Math.min(30, 9 + 3.2 * Math.sqrt(Math.max(1, n)))
    ===================================================================== */
 function isWide() { return (window.innerWidth || 375) >= 900; }
 function render(force) {
+  S.inRender = true;
+  try { renderBody(force); } finally { S.inRender = false; }
+}
+function renderBody(force) {
   if (S.dragging && Date.now() - (S.dragAt || 0) > 8000) clearDrag(); // a drag that lost its finger must never freeze the screen
   if (S.dragging || S.swiping) { S.dirty = true; return; }
   S.now = Date.now();
@@ -3154,8 +3160,8 @@ function render(force) {
   document.body.classList.toggle("wide", wide);
   document.body.classList.toggle("dock", wide && !!S.focus);
   renderHeader(model); renderTabbar(model);
-  var tabSig = S.tab === "today" ? todayKey(model) : S.tab === "saves" ? savesKey() : S.tab === "activity" ? activityKey(model) : S.tab === "assistant" ? assistantKey(model) : S.tab === "overnight" ? autopilotKey(model) : S.tab === "decide" || S.tab === "autopilot" || S.tab === "sessions" ? rfKey(model) : "";
-  var sig = JSON.stringify([model.sig, S.dbState, S.dbError, S.tab, S.view, S.group, S.sub, S.sel, S.list, S.filter, S.query, S.more, S.busy, Object.keys(S.unknown).map(function (k) { return k + S.unknown[k].asked; }).join(), homeScreenNeeded(), S.reqLoaded, archivedList().length, window.innerWidth < 600, wide, wide && !!S.focus, waitIds(), Object.keys(S.unreadMap).sort().join(","), Object.keys(S.pins).sort().join(","), S.hint, DEV.state, JSON.stringify(DEV.paired), needsPairing(model), Object.keys(S.sig).map(function (k) { return k + docVerdict(k); }).join(), tabSig, quickSig()]);
+  var tabSig = S.tab === "now" || S.tab === "chats" ? rfKey(model) : S.tab === "log" ? [activityKey(model), savesKey(), rfKey(model), autopilotKey(model)].join("|") : S.tab === "today" ? todayKey(model) : S.tab === "saves" ? savesKey() : S.tab === "activity" ? activityKey(model) : S.tab === "assistant" ? assistantKey(model) : S.tab === "overnight" ? autopilotKey(model) : S.tab === "decide" || S.tab === "autopilot" || S.tab === "sessions" ? rfKey(model) : "";
+  var sig = JSON.stringify([model.sig, S.dbState, S.dbError, S.tab, S.v21, S.view, S.group, S.sub, S.sel, S.list, S.filter, S.query, S.more, S.busy, Object.keys(S.unknown).map(function (k) { return k + S.unknown[k].asked; }).join(), homeScreenNeeded(), S.reqLoaded, archivedList().length, window.innerWidth < 600, wide, wide && !!S.focus, waitIds(), Object.keys(S.unreadMap).sort().join(","), Object.keys(S.pins).sort().join(","), S.hint, DEV.state, JSON.stringify(DEV.paired), needsPairing(model), Object.keys(S.sig).map(function (k) { return k + docVerdict(k); }).join(), tabSig, quickSig()]);
   if (force || sig !== S.lastSig) {
     S.lastSig = sig;
     var ae = document.activeElement, key = ae && ae.getAttribute && ae.getAttribute("data-k");
@@ -3203,6 +3209,7 @@ function loadLocal() {
   try { S.cardState = cleanCardState(JSON.parse(lsGet("mc-cards-v1") || "null")); } catch (e) {}
   try { var hb = JSON.parse(lsGet("mc-hb-v1") || "null"); if (hb && typeof hb === "object") NAMES.forEach(function (n) { if (isFinite(hb[n]) && hb[n] > 0) S.hbNewest[n] = hb[n]; }); } catch (e) {}
   try { var dr = JSON.parse(lsGet("mc-drafts-v1") || "null"); if (dr && typeof dr === "object") Object.keys(dr).forEach(function (k) { if (typeof dr[k] === "string" && dr[k]) S.drafts[k] = dr[k].slice(0, 4000); }); } catch (e) {}
+  if (typeof v21Load === "function") v21Load();
   lsSet("mc-drafts-v1", "{}"); // loaded once; written again only when the page is hidden with messages waiting
 }
 function saveReadAt() {
@@ -3284,29 +3291,37 @@ function renderOffBanner(model) {
 function renderHeader(model) {
   renderOffBanner(model);
   renderUsageRow(model);
-  $("usageRow").style.display = S.tab === "today" || S.tab === "decide" ? "none" : "";
+  $("usageRow").style.display = S.tab === "today" || S.tab === "decide" || S.tab === "now" ? "none" : "";
   renderMacChip(model);
 }
 /* ---------- bottom tabs (left sidebar from 900 px) ---------- */
-var TABS = [["decide", "Decide", "decide"], ["autopilot", "Autopilot", "autopilot"], ["saves", "Saves", "save"], ["sessions", "Sessions", "sessions"]];
+var TABS = [["now", "Now", "decide"], ["chats", "Chats", "sessions"], ["log", "Log", "activity"]];
 function renderTabbar(model) {
-  var bd = rfBadges(rfPendNow(), rfJobsNow(model));
-  var counts = { decide: bd.decide, sessions: 0, autopilot: bd.autopilot, saves: 0 };
-  var key = JSON.stringify([S.tab, counts]), bar = $("tabbar");
+  var counts = { now: typeof v21NowCount === "function" ? v21NowCount() : 0, chats: 0, log: 0 }, nav = v21NavOf(S.tab);
+  var key = JSON.stringify([nav, counts]), bar = $("tabbar");
   if (bar.getAttribute("data-key") === key) return;
   bar.setAttribute("data-key", key); clear(bar);
   var inner = h("div", { "class": "in" }, h("div", { "class": "brand", text: "Mission Control" }));
   TABS.forEach(function (t) {
-    var n = counts[t[0]], on = S.tab === t[0];
-    inner.appendChild(h("button", { "class": "tab", type: "button", "data-k": "tab-" + t[0], "aria-current": on ? "page" : null, "aria-label": t[1] + (t[0] === "decide" && n ? ", " + n + " one-tap decisions" : t[0] === "autopilot" && n ? ", " + n + " need a yes" : ""),
-      onclick: function () { setTab(t[0]); } }, icon(t[2], 22), h("span", { text: t[1] }), n ? h("span", { "class": "tbadge" + (t[0] === "decide" ? " wait" : ""), "aria-hidden": "true", text: String(n) }) : null));
+    var n = counts[t[0]], on = nav === t[0];
+    inner.appendChild(h("button", { "class": "tab", type: "button", "data-k": "tab-" + t[0], "aria-current": on ? "page" : null, "aria-label": t[1] + (t[0] === "now" && n ? ", " + n + " need you" : ""),
+      onclick: function () { setTab(t[0]); } }, icon(t[2], 22), h("span", { text: t[1] }), n ? h("span", { "class": "tbadge wait", "aria-hidden": "true", text: String(n) }) : null));
   });
   bar.appendChild(inner);
 }
+/** Old names (decide, sessions, activity, saves, autopilot, today) land on their v21 home; assistant and overnight stay screens. */
 function setTab(k) {
+  var r = v21Route(k);
+  var segChanged = !!r.seg && r.tab === "log" && S.v21.log !== r.seg;
+  if (segChanged) { S.v21.log = r.seg; v21Save(); S.lastSig = ""; }
+  setTabRaw(r.tab);
+  if (segChanged && S.tab === r.tab) render(true);
+}
+function setTabRaw(k) {
   if (k === S.tab) { if (k === "sessions" && S.rf.sessMode === "browse" && (S.group || S.sub || S.view !== "home")) go(null, null); else if (k === "sessions" && S.rf.sessMode !== "home" && S.view === "home") { S.rf.sessMode = "home"; render(true); window.scrollTo(0, 0); } else window.scrollTo(0, 0); return; }
   S.menuOpen = false; renderMenu();
   S.tab = k; S.sel = null; S.lastSig = ""; S.zoom = 1; S.panX = 0; S.panY = 0;
+  if (k !== "sessions") S.view = "home";
   render(true); window.scrollTo(0, 0);
 }
 /** Large title for Today, Saves and Activity (Sessions has its own navigation header). */
@@ -3315,6 +3330,7 @@ function renderTabHero(model) {
   clear(nav); clear(hero); nav.classList.remove("scrolled"); observeTitle();
   if (S.tab === "today" && S.todayData) { var p = S.todayData.pick; cap = todayCaption(S.now, p.running.length + p.runningMore, p.needs.length + p.needsMore, p.done.length + p.doneMore); }
   else if (S.tab === "saves") { var sp = savesPick(); cap = sp.state === "ok" ? plural(sp.doc.items.length, "save", "saves") + " this month" : ""; }
+  else if (S.tab === "now" || S.tab === "chats" || S.tab === "log") cap = v21Sub(model);
   else if (S.tab === "activity") cap = "Replies, archives and starts";
   else if (S.tab === "assistant") { var ai = S.assistInfo || assistantInfo(model.mstat); cap = ai.state === "ready" ? "Your MC Assistant on the " + ai.machine + " \u00b7 online" : ai.state === "offline" ? "Your MC Assistant \u00b7 " + ai.machine + " offline" : "Not set up yet"; }
   else if (S.tab === "overnight") cap = "Works while you sleep. Nothing starts without your yes.";
@@ -3322,9 +3338,9 @@ function renderTabHero(model) {
   else if (S.tab === "autopilot") cap = "Jobs that run themselves. Tap one to see what is inside.";
   else if (S.tab === "sessions") { var rm = S.model, un = rm ? rfStackList(uniq(rm), false).length : 0; cap = S.rf.sessMode === "home" ? "Tap a chat to open it." : rm ? plural(uniq(rm).length, "chat", "chats") + ", " + un + " unsorted." : ""; }
   hero.className = "hero";
-  if (S.tab === "activity" || S.tab === "overnight" || S.tab === "assistant") hero.appendChild(h("button", { "class": "btn link back2", type: "button", onclick: function () { setTab(S.tab === "overnight" ? "autopilot" : "decide"); }, text: S.tab === "overnight" ? "\u2039 Autopilot" : "\u2039 Decide" }));
-  hero.appendChild(h("div", { "class": "titlerow" }, h("h2", { "class": "large", id: "ptitle", tabindex: "-1", text: ({ today: "Today", saves: "Saves", activity: "Activity", assistant: "Assistant", autopilot: "Autopilot", decide: "Decide", overnight: "Overnight run", sessions: "Sessions" })[S.tab] || "" })));
-  if (cap) hero.appendChild(h("div", { "class": "cap", text: cap }));
+  if (S.tab === "activity" || S.tab === "overnight" || S.tab === "assistant") hero.appendChild(h("button", { "class": "btn link back2", "data-k": "v21-back", type: "button", onclick: function () { setTab(S.tab === "overnight" ? "autopilot" : "chats"); }, text: S.tab === "overnight" ? "\u2039 Log" : "\u2039 Chats" }));
+  hero.appendChild(h("div", { "class": "titlerow" }, h("h2", { "class": "large", id: "ptitle", tabindex: "-1", text: ({ now: "Now", chats: "Chats", log: "Log", today: "Today", saves: "Saves", activity: "Activity", assistant: "Assistant", autopilot: "Autopilot", decide: "Decide", overnight: "Overnight run", sessions: "Sessions" })[S.tab] || "" })));
+  if (cap) hero.appendChild(h("div", { "class": "cap" + (S.tab === "now" || S.tab === "chats" || S.tab === "log" ? " sub75" : ""), "data-k": "v21-sub", text: cap }));
 }
 
 /* ---------- navigation: iOS back button, large title, Bubbles | List ---------- */
@@ -3439,6 +3455,8 @@ function renderMain(model) {
   var pb = pairBanner(model); if (pb) main.appendChild(pb);
   var ub = unverifiedNote(model); if (ub) main.appendChild(ub);
   var un = updateNote(); if (un) main.appendChild(un);
+  if (S.tab === "now") { main.appendChild(v21NowNode(model)); return; }
+  if (S.tab === "log") { main.appendChild(v21LogNode(model)); return; }
   if (S.tab === "decide") { main.appendChild(decideNode(model)); return; }
   if (S.tab === "autopilot") { main.appendChild(autopilotRfNode(model)); return; }
   if (S.tab === "overnight") { main.appendChild(autopilotNode(model)); return; }
@@ -3447,7 +3465,9 @@ function renderMain(model) {
   if (S.tab === "activity") { main.appendChild(activityNode(model)); return; }
   if (!model.loaded) { main.appendChild(emptyBox("Connecting…", "Waiting for your computers to report in.")); return; }
   if (model.neverSeen) { main.appendChild(emptyBox("No computer connected yet", "No computer connected yet. Open the Claude app on your Mac or PC with Mission Control 0.8.6+.")); return; }
+  if (S.tab === "chats") { main.appendChild(v21ChatsNode(model)); return; }
   if (S.tab === "today") { main.appendChild(todayNode(model)); return; }
+  if (S.tab === "sessions") main.appendChild(h("button", { "class": "btn link back2", type: "button", "data-k": "v21-tochats", onclick: function () { S.view = "home"; S.group = null; S.sub = null; S.query = ""; S.filter = "all"; setTabRaw("chats"); }, text: "\u2039 Chats" }));
   if (S.tab === "sessions" && S.rf.sessMode === "home" && S.view !== "archive") { main.appendChild(sessionsHomeNode(model)); return; }
   if (S.tab === "sessions" && S.rf.sessMode === "stack" && S.view !== "archive") { main.appendChild(sessionsStackNode(model)); return; }
   if (S.tab === "sessions" && S.view === "home" && !S.group && !S.sub && S.filter === "all" && !S.query.trim()) main.appendChild(h("button", { "class": "rf-link rf-blk", type: "button", "data-k": "rf-tosort", onclick: function () { S.rf.sessMode = "stack"; render(true); window.scrollTo(0, 0); }, text: "\u2039 Sort chats" }));
@@ -3551,7 +3571,7 @@ function todayNode(model) {
       dc.appendChild(h("button", { "class": "win", type: "button", "data-k": "t-" + s.id, onclick: function () { openFocus(s.id); } }, h("span", { "class": "dot on", "aria-hidden": "true" }), h("span", { "class": "w", text: s.title }), h("span", { "class": "cap", text: shortAge(s.last, S.now) })));
     });
     f.appendChild(dc);
-    if (p.doneMore) f.appendChild(h("button", { "class": "btn link", type: "button", onclick: function () { S.filter = "all"; setTab("sessions"); }, text: "+" + p.doneMore + " more in Sessions" }));
+    if (p.doneMore) f.appendChild(h("button", { "class": "btn link", type: "button", onclick: function () { S.filter = "all"; setTab("sessions"); }, text: "+" + p.doneMore + " more in Chats" }));
   }
   return f;
 }
@@ -3722,7 +3742,7 @@ function checkReqWatch() {
   rfCheck();
   Object.keys(S.reqWatch).forEach(function (id) {
     var w = S.reqWatch[id], x = reqState(id), a = w.f.action;
-    if (x.st === "done") { delete S.reqWatch[id]; if (a === "skill-verdict") { S.sk.done[w.f.skillId] = w.f.verdict; w.f.doneMsg = w.f.verdict === "approve" ? "Approved. Ask Claude to build the skill when you are ready." : "Rejected. It will not be suggested again."; } toast(w.f.doneMsg || REQ_DONE[a] || "Done."); render(true); }
+    if (x.st === "done") { delete S.reqWatch[id]; if (a === "skill-verdict") { S.sk.done[w.f.skillId] = w.f.verdict; w.f.doneMsg = w.f.verdict === "approve" ? "Approved. Ask Claude to build the skill when you are ready." : "Rejected. It will not be suggested again."; } toast(w.f.doneMsg || REQ_DONE[a] || "Done.", /see Chats/.test(str(w.f.doneMsg)) ? { open: "chats" } : undefined); render(true); }
     else if (x.st === "error") {
       delete S.reqWatch[id];
       if (a === "skill-verdict" && /^(?:tool error:\s*)?(already-done|not-found)$/i.test(str(x.r.error))) S.sk.done[w.f.skillId] = "gone";
@@ -3737,7 +3757,7 @@ function sendNeedsYes(r) {
   var sid = str(r.sessionId), t = str(r.text);
   if (sid && t && !str(S.drafts[sid]).trim()) S.drafts[sid] = t;
   var box = sid && S.focus === sid && document.querySelector ? document.querySelector('[data-k="freply"]') : null; if (box && !box.value) box.value = t;
-  toast("Waiting for this chat\u2019s yes screen \u2014 it\u2019ll appear in Decide within a few seconds. Your reply is kept.");
+  toast("Waiting for this chat\u2019s yes screen \u2014 it\u2019ll appear in Now within a few seconds. Your reply is kept.", { open: "now" });
   return true;
 }
 function checkSendWatch() {
@@ -4361,7 +4381,7 @@ function openDevices() {
 function confirmUnpair(machine, d) {
   if (!/^[0-9a-f]{32}$/.test(str(d.id))) { toast("This device can't be removed from here."); return; }
   S.ask = { title: "Remove this device?", okLabel: "Remove", body: "“" + d.name + "” on " + machine + " will no longer be able to control it. You can pair it again with a new code.",
-    ok: function () { createRequest(unpairFields(machine, d)).then(function (id) { if (id) { toast("Removal requested. See Activity."); if (d.id && d.id === DEV.deviceId) setPaired(machine, false); } }); } };
+    ok: function () { createRequest(unpairFields(machine, d)).then(function (id) { if (id) { toast("Removal requested. See Log.", { open: "activity" }); if (d.id && d.id === DEV.deviceId) setPaired(machine, false); } }); } };
   renderDialog();
 }
 
@@ -4762,7 +4782,7 @@ function openRetry(r, f) {
   renderDialog();
 }
 function openRestore(r, target, title) {
-  S.ask = { title: "Restore this session?", okLabel: "Restore", body: "“" + title + "” comes back from the archive on " + target + ".", ok: function () { createRequest(restoreFields(r.sessionId, target)).then(function (id) { if (id) toast("Restore requested. See Activity."); }); } };
+  S.ask = { title: "Restore this session?", okLabel: "Restore", body: "“" + title + "” comes back from the archive on " + target + ".", ok: function () { createRequest(restoreFields(r.sessionId, target)).then(function (id) { if (id) toast("Restore requested. See Log.", { open: "activity" }); }); } };
   renderDialog();
 }
 
@@ -5190,7 +5210,6 @@ function renderQuickBtn() {
   b.setAttribute("data-key", key); clear(b);
   b.setAttribute("aria-label", quickAria(n)); b.setAttribute("aria-expanded", String(!!S.qa.open));
   b.appendChild(h("span", { "aria-hidden": "true", text: "⚡" }));
-  if (n) b.appendChild(h("span", { "class": "qbadge", "aria-hidden": "true", text: n > 99 ? "99+" : String(n) }));
 }
 /** Today's banner: "3 chats waiting on you" opens the Waiting segment. */
 function quickBanner() {
@@ -5370,7 +5389,7 @@ function quickReply(c, t) {
 function quickRun(name, desc, fields) {
   if (!fields) return;
   quickAsk(quickConfirm("run", { name: name, desc: desc }), function () {
-    fields.doneMsg = "Started " + name + " · see Sessions";
+    fields.doneMsg = "Started " + name + " · see Chats";
     createRequest(fields).then(function (rid) { if (rid) toast("Asked the Mac to start " + name + "…"); });
   });
 }
@@ -5393,7 +5412,7 @@ function quickArchive(ids) {
 async function quickUndo(ids, targets) {
   var n = 0;
   for (var i = 0; i < ids.length; i++) { var rid = await createRequest(restoreFields(ids[i], targets[ids[i]]), { noWatch: true }); if (rid) n++; }
-  toast(n ? "Restore requested for " + plural(n, "chat", "chats") + ". See Activity." : "Nothing restored.");
+  toast(n ? "Restore requested for " + plural(n, "chat", "chats") + ". See Log." : "Nothing restored.", n ? { open: "activity" } : undefined);
 }
 function quickReload(target) {
   quickAsk(quickConfirm("reload"), function () {
@@ -5740,6 +5759,7 @@ function quickTidySig(gate, m) {
 var QA_SEGS = [["wait", "Waiting"], ["run", "Run"], ["tidy", "Tidy"], ["mac", "Mac"]];
 function renderQuick() {
   var host = $("quickHost"); if (!host) return;
+  if (typeof v21Kick === "function") v21Kick(); // a card answered here lives on the Now tab too
   renderQuickBtn();
   if (!S.qa.open) { tidyDragClear(); if (host.firstChild) { clear(host); if (!S.focus) setInert(false); } host.removeAttribute("data-key"); return; }
   if (QD && QD.active) { if (Date.now() - QD.at > 15000) tidyDragClear(); else { QD.dirty = true; return; } } // never rebuild the row that is under a finger
@@ -5927,12 +5947,12 @@ function rfQuestionAnswer(d, label) {
     return item && item.kind === "question" && item.inputHash === d.inputHash ? qAnswerFields(item, [label], null) : null;
   });
 }
-function rfReversible(d, f, outcome, label) {
+function rfReversible(d, f, outcome, label, ms) {
   if (!f) { toast("That looks wrong, so nothing was sent."); return; }
   rfLocalSet(d, outcome, { undo: true }); rfCloseSheet(true);
   rfSend(f, { id: d.id, onFail: function () { delete S.rf.local[d.id]; } }).then(function (rid) {
     if (!rid) { delete S.rf.local[d.id]; render(true); return; }
-    toast(label || outcome, { undo: function () { rfUndo(d.id, d.machine); }, ms: RF_HOLD_MS });
+    toast(label || outcome, { undo: function () { rfUndo(d.id, d.machine); }, ms: ms || RF_HOLD_MS });
   });
   render(true);
 }
@@ -5946,7 +5966,7 @@ function rfSnooze(d, kind) {
   var until = rfSnoozeUntil(kind, Date.now());
   rfReversible(d, rfSnoozeFields(d, until, d.machine), rfSnoozeText(kind, until), rfSnoozeText(kind, until));
 }
-function rfDismiss(d) { rfReversible(d, rfIdFields("decision-dismiss", d, d.machine), "Not doing (archived)", "Archived. Undo from Cleared today."); }
+function rfDismiss(d) { rfReversible(d, rfIdFields("decision-dismiss", d, d.machine), "Not doing (archived)", "Archived. Undo from Cleared today.", 5000); }
 function rfDoGo(d) {
   rfHold(d, "Claude is on it", function () { var now = rfDec(d.id); return rfSame(d, now) ? rfDoitFields(now, "", now.machine) : null; });
 }
@@ -6011,11 +6031,12 @@ function rfCardSend(d, pills) {
   rfOpenDec(d.id, null);
   S.rf.vals[d.id] = ans; S.rf.gateAns = { id: d.id, answer: ans }; S.rf.gate = d.id; renderDec();
 }
-function rfCard(d) {
+function rfCard(d, extra) {
   var pills = rfCardPills(d), free = d.kind === "text", sel = S.rf.sel[d.id];
   var card = h("div", { "class": "rf-card", "data-k": "rf-card-" + d.id });
   card.appendChild(h("div", { "class": "rf-ck", text: d.project }));
   card.appendChild(h("div", { "class": "rf-cq", text: d.ask }));
+  if (extra) card.appendChild(extra);
   var grp = h("div", { "class": "rf-cpills", role: "radiogroup", "aria-label": d.ask });
   var send = h("button", { "class": "rf-csend", type: "button", "data-k": "rf-csend-" + d.id, onclick: function () { rfCardSend(d, pills); } });
   var refreshSend = function () { var a = rfCardAnswer(d, pills); send.disabled = !a; send.textContent = a ? "Send" : "Pick an answer"; };
@@ -6660,7 +6681,7 @@ function rfDeepLink() {
 }
 function rfDeepSet(id) { if (/^[0-9a-f]{32}$/.test(str(id))) { S.rf.deep = id; rfDeepLink(); } }
 function rfBadgeSync() {
-  var n = rfBadgeCount(S.rfd && S.rfd.known ? rfPendNow().length : 0);
+  var n = rfBadgeCount(typeof v21NowCount === "function" ? v21NowCount() : S.rfd && S.rfd.known ? rfPendNow().length : 0);
   if (S.rf.badge === n) return; S.rf.badge = n;
   try { if (n && navigator.setAppBadge) navigator.setAppBadge(n).catch(function () {}); else if (!n && navigator.clearAppBadge) navigator.clearAppBadge().catch(function () {}); } catch (e) {}
 }
@@ -6676,6 +6697,256 @@ function rfInit() {
   rfPushRefresh(); rfPushPrefs();
 }
 /* @refocus-ui-end */
+/* ---------- v21 redesign shell (Now / Chats / Log): pure rules, no DOM. Tests: tests/v21.test.mjs. Mock: mocks/v3-redesign.artifact.html ---------- */
+/* @pure-start */
+var V21_ROUTES = { decide: ["now", ""], today: ["now", ""], sessions: ["chats", ""], autopilot: ["log", "results"], saves: ["log", "saves"], activity: ["log", "all"] };
+/** An old tab name (menu, toasts, deep links) becomes its v21 home: { tab, seg }. Names that are still screens (assistant, overnight) stay as they are. */
+function v21Route(k) { var r = V21_ROUTES[k]; return r ? { tab: r[0], seg: r[1] } : { tab: k, seg: "" }; }
+/** Which of the three bottom tabs a screen belongs to. */
+function v21NavOf(tab) {
+  if (tab === "chats" || tab === "sessions" || tab === "assistant") return "chats";
+  if (tab === "log" || tab === "saves" || tab === "activity" || tab === "autopilot" || tab === "overnight") return "log";
+  return "now";
+}
+var V21_STATUSES = [["all", "All"], ["needs", "Needs you"], ["running", "Running"], ["idle", "Idle"], ["done", "Done"]];
+/** One status word per chat: needs you, running, done (finished today) or idle. */
+function v21Status(s, needs, now) {
+  if (!s) return "idle";
+  if (s.status !== "running" && needs) return "needs";
+  if (s.status === "running") return "running";
+  if (s.status !== "stale" && isFinite(s.last) && isFinite(now) && dayKey(s.last) === dayKey(now)) return "done";
+  return "idle";
+}
+function v21Project(s, gmap) {
+  var g = gmap && s && gmap[s.group];
+  return g && g.name ? String(g.name) : (s && s.group && s.group !== "unsorted" ? String(s.group) : "Unsorted");
+}
+/** Status and project together (both must match). "all" means no filter. */
+function v21Filter(list, st, pj, statusOf, projectOf) {
+  return (list || []).filter(function (s) { return (st === "all" || statusOf(s) === st) && (pj === "all" || projectOf(s) === pj); });
+}
+/** Chip counts: each status count respects the project filter, each project count respects the status filter. */
+function v21Counts(list, st, pj, statusOf, projectOf) {
+  var sc = { all: 0, needs: 0, running: 0, idle: 0, done: 0 }, pc = Object.create(null), names = [];
+  (list || []).forEach(function (s) {
+    var a = statusOf(s), p = projectOf(s);
+    if (!(p in pc)) { pc[p] = 0; names.push(p); }
+    if (pj === "all" || p === pj) { sc.all++; sc[a]++; }
+    if (st === "all" || a === st) pc[p]++;
+  });
+  names.sort(function (a, b) { return a === "Unsorted" ? 1 : b === "Unsorted" ? -1 : a < b ? -1 : a > b ? 1 : 0; });
+  return { status: sc, projects: names.map(function (n) { return { name: n, n: pc[n] }; }), total: sc.all };
+}
+/** Items grouped by project, in the order each project first appears. */
+function v21Group(list, projectOf) {
+  var out = [], idx = Object.create(null);
+  (list || []).forEach(function (s) { var p = projectOf(s); if (!idx[p]) { idx[p] = { name: p, items: [] }; out.push(idx[p]); } idx[p].items.push(s); });
+  return out;
+}
+/** The one Now list. quick = the Waiting cards, pend = pending decisions, jobs = autopilot jobs that need a yes.
+ *  gatedOf(card) = the gated decision a card stands for (shown once, as the card); coveredAway(d) = an Away decision whose live prompt is already a card.
+ *  Answered cards stay as a green line (done:true) and are not counted. */
+function v21NowList(quick, pend, jobs, gatedOf, coveredAway) {
+  var out = [], gated = Object.create(null), decSess = Object.create(null), sp = rfSplit(pend || []);
+  sp.decide.forEach(function (d) { if (d.sessionId) decSess[d.sessionId] = true; }); // only decisions that are drawn as cards hide the chat's own waiting card
+  (quick || []).forEach(function (c) { if (c.done) return; var g = gatedOf ? gatedOf(c) : null; if (g) gated[g.id] = true; });
+  (quick || []).forEach(function (c) {
+    if (c.done) { out.push({ k: "quick", id: c.id, c: c, done: true }); return; }
+    var held = c.kind === "pq" || c.kind === "pp";
+    var g = gatedOf ? gatedOf(c) : null;
+    if (!held && !g && decSess[c.id]) return; // the chat's own decision card says it better
+    out.push({ k: "quick", id: c.id, c: c, done: false });
+  });
+  sp.decide.forEach(function (d) { if (gated[d.id] || (coveredAway && coveredAway(d))) return; out.push({ k: "dec", id: d.id, d: d, done: false }); });
+  sp.todo.forEach(function (d) { if (gated[d.id]) return; out.push({ k: "todo", id: d.id, d: d, done: false }); });
+  (jobs || []).forEach(function (j) { out.push({ k: "job", id: j.id, j: j, done: false }); });
+  return out;
+}
+function v21Count(list) { return (list || []).filter(function (x) { return !x.done; }).length; }
+/** The "What's going on" text: the lines given, whitespace folded, last 3 lines, cut to 500. "" when there is none (the box is then left out). */
+function v21Ctx(parts) {
+  var lines = (parts || []).map(function (p) { return str(p).replace(/[\u0000-\u0008\u000b-\u001f\u007f]+/g, " ").replace(/[ \t]+/g, " ").trim(); }).filter(Boolean);
+  var t = lines.slice(-3).join("\n");
+  return t.length > 500 ? t.slice(0, 499) + "…" : t;
+}
+var V21_PLACES = { now: 1, chats: 1, log: 1, assistant: 1, overnight: 1 };
+/** A toast's `open` option: a place name, or { tab, seg }. Anything else gives no button. */
+function v21OpenTarget(o) {
+  var t = typeof o === "string" ? { tab: o, seg: "" } : o && typeof o === "object" ? { tab: str(o.tab), seg: str(o.seg) } : null;
+  if (!t) return null;
+  var r = v21Route(t.tab); if (!V21_PLACES[r.tab]) return null;
+  return { tab: r.tab, seg: t.seg || r.seg };
+}
+/** Is this command one the existing explainer calls destructive? (danger styling on the card) */
+function v21Risky(it) { return !!(it && str(it.summary) && (!it.tool || it.tool === "Bash") && cmdExplain(it.summary).destructive); }
+/* @pure-end */
+/* @v21-ui-start */
+var V21_LOG_SEGS = [["all", "All"], ["results", "Results"], ["saves", "Saves"]];
+function v21Load() {
+  try {
+    var o = JSON.parse(lsGet("mc-v21-filter") || "null"); if (!o || typeof o !== "object") return;
+    if (V21_STATUSES.some(function (x) { return x[0] === o.st; })) S.v21.st = o.st;
+    if (typeof o.pj === "string" && o.pj.length < 80) S.v21.pj = o.pj;
+    if (V21_LOG_SEGS.some(function (x) { return x[0] === o.log; })) S.v21.log = o.log;
+  } catch (e) {}
+}
+function v21Save() { lsSet("mc-v21-filter", JSON.stringify({ st: S.v21.st, pj: S.v21.pj, log: S.v21.log })); }
+function v21Items() {
+  var R = rfData(), cards = quickCardsNow(), pq = rfPendItems();
+  var jobs = R.known ? rfJobsNow(S.model).filter(function (j) { return j.status === "needs-yes"; }) : [];
+  return v21NowList(cards, R.known ? rfPendNow() : [], jobs, function (c) {
+    return c.kind === "pq" || c.kind === "pp" ? rfGatedDecFor(c.item && c.item.sessionId, c.item && c.item.itemId, c.machine) : rfGatedDecFor(c.id, "", c.machine);
+  }, function (d) { return d.source === "away" && !!rfPermItem(d, pq); });
+}
+function v21NowCount() { return v21Count(v21Items()); }
+function v21DoneToday(model) { var p = todayPick(uniq(model), S.now, flagsOf); return p.done.length + p.doneMore; }
+/** Go to a place and (optionally) a Log filter. Used by toast Open buttons. */
+function v21Go(t) {
+  if (!t) return;
+  if (t.seg && V21_LOG_SEGS.some(function (x) { return x[0] === t.seg; }) && t.tab === "log") { S.v21.log = t.seg; v21Save(); }
+  var before = S.tab;
+  if (t.tab === "assistant" || t.tab === "overnight") setTabRaw(t.tab); else setTab(t.tab);
+  if (S.tab === before) render(true);
+}
+function v21CtxBox(text) {
+  return text ? h("div", { "class": "nctx", "data-k": "v21-ctx" }, h("b", { text: "What’s going on" }), h("span", { text: text })) : null;
+}
+function v21SessCtx(sid) {
+  var v = S.peek[sid], s = S.byId && S.byId[sid], parts = [];
+  if (v && v.status === "ok" && v.items && v.items.length) v.items.slice(-2).forEach(function (it) { parts.push(it.text); });
+  else if (s && s.ask) parts.push(s.ask);
+  return v21Ctx(parts);
+}
+function v21Head(project, kind, ageMs, bad, title) {
+  return h("div", { "class": "nhd" }, h("span", { "class": "nproj", text: (title ? title + " \u00b7 " : "") + (project || "Chat") }), kind ? h("span", { "class": "ntag" + (bad ? " bad" : ""), text: kind }) : null,
+    isFinite(ageMs) && ageMs > 0 ? h("span", { "class": "nage", text: shortAge(ageMs, S.now) }) : null);
+}
+function sessTitle(sid) { var s = sid && S.byId && S.byId[sid]; return s && s.title && !(s.title === "") ? s.title : ""; }
+function v21NowCard(it, gate) {
+  var a, card, project, age = NaN, kind = "", ctx = "", bad = false;
+  if (it.k === "quick") {
+    var c = it.c, held = c.kind === "pq" || c.kind === "pp", sid = held ? c.item && c.item.sessionId : c.id, sess = S.byId && S.byId[sid];
+    project = sess ? v21Project(sess, S.model && S.model.gmap) : ""; age = c.last;
+    kind = c.kind === "pp" ? "Permission" : c.kind === "pq" || c.kind === "question" ? "Question" : c.kind === "turn" ? "Your turn" : c.kind === "perm" ? "Permission" : "Waiting";
+    bad = held && c.kind === "pp" && v21Risky(c.item);
+    ctx = c.ask && !held ? v21Ctx([c.ask]) : v21SessCtx(sid);
+    card = h("article", { "class": "ncard" + (bad ? " danger" : "") + (c.done ? " done" : ""), "data-k": "now-" + c.id });
+    card.appendChild(v21Head(project, c.done ? "" : kind, age, bad, c.title));
+    if (!c.done) { var cb = v21CtxBox(ctx); if (cb) card.appendChild(cb); }
+    card.appendChild(quickCardNode(c, gate));
+    return card;
+  }
+  if (it.k === "dec") {
+    var d = it.d; ctx = v21Ctx(d.context || []);
+    card = h("article", { "class": "ncard", "data-k": "now-" + d.id });
+    card.appendChild(v21Head(d.project, d.source === "away" ? "Permission" : "Decision", d.createdAt, false, sessTitle(d.sessionId)));
+    var cb2 = v21CtxBox(ctx); if (cb2) card.appendChild(cb2);
+    var plan = d.what && d.what !== d.ask ? h("div", { "class": "nplan", "data-k": "v21-plan-" + d.id }, h("b", { text: "Plan" }), h("span", { text: d.what })) : null;
+    if (rfIsCard(d)) { card.appendChild(rfCard(d, plan)); return card; }
+    card.appendChild(h("div", { "class": "ntitle", text: d.ask }));
+    if (plan) card.appendChild(plan);
+    card.appendChild(h("button", { "class": "nbtn primary", type: "button", "data-k": "rf-dec-" + d.id, onclick: function (e) { rfOpenDec(d.id, e.currentTarget); }, text: "Review and answer" }));
+    card.appendChild(h("button", { "class": "nbtn sec", type: "button", "data-k": "v21-not-" + d.id, onclick: function () { rfDismiss(d); }, text: "Not doing" }));
+    return card;
+  }
+  if (it.k === "todo") {
+    card = h("article", { "class": "ncard", "data-k": "now-" + it.d.id });
+    card.appendChild(v21Head(it.d.project, "To-do", it.d.createdAt, false, sessTitle(it.d.sessionId))); card.appendChild(rfTodoRow(it.d)); return card;
+  }
+  card = h("article", { "class": "ncard", "data-k": "now-" + it.j.id });
+  card.appendChild(v21Head(it.j.title || "Autopilot", "Needs a yes", NaN, false)); card.appendChild(rfJobRow(it.j)); return card;
+}
+function v21NowNode(model) {
+  var f = document.createDocumentFragment(), R = rfData(), now = Date.now();
+  if (!model.loaded) return emptyBox("Connecting…", "Waiting for your computers to report in.");
+  if (model.neverSeen) return emptyBox("No Mac connected yet", "Open the Claude app on your Mac or PC with Mission Control 0.8.6+, then this fills in.");
+  var items = v21Items(), n = v21Count(items), gate = quickGate(model.mstat);
+  if (!items.length) f.appendChild(h("div", { "class": "nempty", "data-k": "v21-allclear", role: "status" }, icon("check", 32), h("b", { text: "All clear · " + v21DoneToday(model) + " done today" }), h("span", { text: "Nothing is waiting on you." })));
+  items.forEach(function (it) { f.appendChild(v21NowCard(it, gate)); });
+  var cl = R.known ? rfClearedList(R.cleared, S.rf.local, S.rf.undone, now) : [];
+  if (cl.length) {
+    f.appendChild(rfSec("Cleared today", cl.length));
+    var cg = h("div", { "class": "rf-grp", "data-k": "rf-cleared" }); cl.forEach(function (c) { cg.appendChild(rfClearedRow(c)); }); f.appendChild(cg);
+  }
+  if (R.known && R.sweep) {
+    var busy = S.rf.sweep.busy || R.sweep.pending > 0;
+    f.appendChild(h("button", { "class": "nbtn sec", type: "button", "data-k": "rf-sweep-check", disabled: busy ? "" : null, onclick: function () { rfSweepCheck(R); }, text: busy ? "Checking chats…" : "Check all chats" }));
+  }
+  if (!R.known) f.appendChild(h("p", { "class": "note", text: "Decisions from your Mac show here once it is updated." }));
+  return f;
+}
+function v21Chip(label, n, on, key, fn) {
+  return h("button", { "class": "vchip" + (on ? " on" : ""), type: "button", "data-k": key, "aria-pressed": String(on), onclick: fn }, label, n !== null && n !== undefined ? h("span", { "class": "vn", text: String(n) }) : null);
+}
+function v21ChatRow(s, st) {
+  var v = S.peek[s.id], live = liveLine(s, v, S.now), m = sessionMeta(s, S.now, v), label = st === "needs" ? "Needs you" : st === "running" ? "Running" : st === "done" ? "Done" : "Idle";
+  var last = live || (st === "needs" ? askText(s) : v && v.status === "ok" && v.items && v.items.length ? str(v.items[v.items.length - 1].text).replace(/\s+/g, " ").slice(0, 120) : m.sub);
+  var row = h("div", { "class": "vchat", "data-k": "v21-chat-" + s.id });
+  row.appendChild(h("button", { "class": "vmain", type: "button", "data-k": "b-" + s.id, "aria-label": s.title + ", " + label, onclick: function () { openFocus(s.id); } },
+    h("span", { "class": "vl1" }, h("span", { "class": "vdot " + st, "aria-hidden": "true" }), h("span", { "class": "vnm", text: s.title }), h("span", { "class": "vst " + st, text: label })),
+    h("span", { "class": "vlast", text: last })));
+  row.appendChild(h("div", { "class": "vacts" },
+    h("button", { "class": "btn link", type: "button", "data-k": "v21-open-" + s.id, onclick: function () { openFocus(s.id); }, text: st === "needs" ? "Reply" : "Open" }),
+    h("button", { "class": "btn link sec", type: "button", "data-k": "v21-arch-" + s.id, onclick: function () { askArchiveMany(s.title, [s]); }, text: "Archive" })));
+  return row;
+}
+function v21ChatsNode(model) {
+  var f = document.createDocumentFragment();
+  if (!model.loaded) return emptyBox("Connecting…", "Waiting for your computers to report in.");
+  if (model.neverSeen) return emptyBox("No computer connected yet", "No computer connected yet. Open the Claude app on your Mac or PC with Mission Control 0.8.6+.");
+  var ai = S.assistInfo || assistantInfo(model.mstat);
+  f.appendChild(h("button", { "class": "vassist", type: "button", "data-k": "v21-assistant", onclick: function () { setTabRaw("assistant"); } }, icon("assistant", 22),
+    h("span", { "class": "vtx" }, h("span", { "class": "vnm", text: "MC Assistant" }), h("span", { "class": "vlast", text: ai.state === "ready" ? "Online on the " + ai.machine : ai.state === "offline" ? ai.machine + " offline" : "Not set up yet" })), h("span", { "aria-hidden": "true", text: "›" })));
+  var all = uniq(model).filter(function (s) { return !s.unverified && !(ai && ai.id && s.id === ai.id); }), needs = S.needsMap || {};
+  var statusOf = function (s) { return v21Status(s, !!needs[s.id], S.now); }, projectOf = function (s) { return v21Project(s, model.gmap); };
+  var cnt = v21Counts(all, S.v21.st, S.v21.pj, statusOf, projectOf);
+  if (S.v21.pj !== "all" && !cnt.projects.some(function (p) { return p.name === S.v21.pj; })) S.v21.pj = "all";
+  var sc = h("div", { "class": "vchips", role: "group", "aria-label": "Filter by status", "data-k": "v21-status" });
+  V21_STATUSES.forEach(function (x) { sc.appendChild(v21Chip(x[1], cnt.status[x[0]], S.v21.st === x[0], "v21-st-" + x[0], function () { S.v21.st = x[0]; v21Save(); render(true); })); });
+  f.appendChild(sc);
+  if (cnt.projects.length > 1) {
+    var pc = h("div", { "class": "vchips", role: "group", "aria-label": "Filter by project", "data-k": "v21-project" });
+    pc.appendChild(v21Chip("All projects", null, S.v21.pj === "all", "v21-pj-all", function () { S.v21.pj = "all"; v21Save(); render(true); }));
+    cnt.projects.forEach(function (p) { pc.appendChild(v21Chip(p.name, p.n, S.v21.pj === p.name, "v21-pj-" + p.name, function () { S.v21.pj = p.name; v21Save(); render(true); })); });
+    f.appendChild(pc);
+  }
+  var list = sortSessions(v21Filter(all, S.v21.st, S.v21.pj, statusOf, projectOf), flagsOf), shown = 0, cap = S.v21.more;
+  if (!list.length) f.appendChild(emptyBox("Nothing matches", all.length ? "No chats match this filter. Choose All to see everything." : "No chats reported yet. Try Refresh in the ⋯ menu."));
+  v21Group(list, projectOf).forEach(function (g) {
+    if (shown >= cap) return;
+    f.appendChild(h("div", { "class": "vsec", "data-k": "v21-grp-" + g.name }, h("span", { text: g.name }), h("span", { text: String(g.items.length) })));
+    g.items.forEach(function (s) { if (shown >= cap) return; shown++; f.appendChild(v21ChatRow(s, statusOf(s))); });
+  });
+  if (list.length > shown) f.appendChild(h("button", { "class": "btn link morebtn", type: "button", "data-k": "v21-more", onclick: function () { S.v21.more += 60; render(true); }, text: "Show " + (list.length - shown) + " more" }));
+  f.appendChild(h("div", { "class": "vfoot" },
+    h("button", { "class": "btn link", type: "button", "data-k": "v21-archive", onclick: function () { S.tab = "sessions"; S.view = "archive"; S.rf.sessMode = "browse"; S.sel = null; S.lastSig = ""; render(true); window.scrollTo(0, 0); }, text: "Archive" + (archiveCount() ? " (" + archiveCount() + ")" : "") }),
+    h("button", { "class": "btn link", type: "button", "data-k": "v21-sort", onclick: function () { S.rf.sessMode = "stack"; setTabRaw("sessions"); }, text: "Sort chats" })));
+  return f;
+}
+function v21LogNode(model) {
+  var f = document.createDocumentFragment(), seg = S.v21.log;
+  var sg = h("div", { "class": "vseg", role: "group", "aria-label": "Show", "data-k": "v21-logseg" });
+  V21_LOG_SEGS.forEach(function (x) { sg.appendChild(h("button", { type: "button", "class": seg === x[0] ? "on" : "", "data-k": "v21-log-" + x[0], "aria-pressed": String(seg === x[0]), onclick: function () { S.v21.log = x[0]; v21Save(); render(true); }, text: x[1] })); });
+  f.appendChild(sg);
+  var sec = function (t) { return h("div", { "class": "vsec", text: null }, h("span", { text: t })); };
+  if (seg === "all") { f.appendChild(sec("Activity")); f.appendChild(activityNode(model)); f.appendChild(sec("Results and jobs")); f.appendChild(autopilotRfNode(model)); f.appendChild(sec("Saves")); f.appendChild(rfSavesNode(model)); }
+  else if (seg === "results") f.appendChild(autopilotRfNode(model));
+  else f.appendChild(rfSavesNode(model));
+  return f;
+}
+var V21_KICK = 0;
+/** The Waiting-card code redraws its own sheet; when the same cards are on the Now tab, redraw that too (once, after the current work). */
+function v21Kick() {
+  if ((S.tab !== "now" && S.tab !== "chats") || S.inRender || V21_KICK) return;
+  V21_KICK = setTimeout(function () { V21_KICK = 0; render(true); }, 30);
+}
+function v21Sub(model) {
+  if (S.tab === "chats") { var n = model ? uniq(model).length : 0; return plural(n, "chat", "chats") + " \u00b7 by project"; }
+  if (S.tab === "log") return "Activity, results and saves";
+  var need = v21NowCount();
+  return (need ? need + " need" + (need === 1 ? "s" : "") + " you" : "Nothing needs you") + " \u00b7 " + (model ? v21DoneToday(model) : 0) + " done today";
+}
+/* @v21-ui-end */
 /* ---------- v15 usability fixes: pure rules (no DOM). Tests: tests/v15.test.mjs ---------- */
 /* @pure-start */
 /** Sessions home: Needs you, Running, then the newest few of the rest. metaOf(s) = sessionMeta(...); its cls decides the group. */

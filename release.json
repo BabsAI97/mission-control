@@ -1,14 +1,13 @@
 {
-  "v": 20,
+  "v": 21,
   "files": {
-    "README.md": "7d4dae276e29e792b3a6d36d37f7777844b33627e0480f40d36da0c1a199b269",
-    "app.js": "abb9fc572780c2c6f348b5da0a744c91905824a8627cab22f22c218b9816d30d",
+    "app.js": "a925f925f7651ba3ece627d3e728fcec54f585d8447e4e8f267c2c76b32bccff",
     "config.js": "6c15f7216e961e1ae126b957affaed3f36466a74c464d2df53fe206ee3a8423d",
     "guard.js": "3c8c7597ffed38ea077179d08b947d4550c4faf5484cab0e000989f5d710f537",
     "icons/icon-180.png": "b8432959d8adf3d86dcb455b610b0fcdf84c92e7d0ee76fefe0254f6adb058c1",
     "icons/icon-192.png": "b577cbce233f0074fa6cfe35ac9493bd5f6c960c4b2a263a080d3b47f429e827",
     "icons/icon-512.png": "f5650704373580941ce866c1f3c0d53038e08e1075a47bea2f001f9c5605c1f6",
-    "index.html": "56207b168dae4f3db20775f3d61c4d2f0d3d8b0ab5a0dcf651d51893e7cda493",
+    "index.html": "1e5d5312b46692eadb53a05b63769fb7e7ad244abd799e09ed6aaa7a6e11e9f3",
     "manifest.webmanifest": "5db574961b46b27843074260672e1ca3e5efc47a3ffe0c695b11d2874732eb92",
     "pwa.js": "6bf23880efe41c12c8637941a189856b062e400d3b0344e96b20febc381f9bdd",
     "relay.js": "916acae49a267ae69186c174bd9a4071f6cb5d3ea262e67acbf491e4b4c9367c",

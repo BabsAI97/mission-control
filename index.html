@@ -875,6 +875,60 @@ body.sheet-lock{position:fixed;left:0;right:0;width:100%;overflow:hidden}
 .rf-noneitem{display:block;width:100%;padding:8px 0;border:0;background:transparent;color:var(--text3);font:inherit;font-size:15px;text-align:left}
 button.rf-noneitem{min-height:44px;cursor:pointer}
 @media (prefers-reduced-motion: reduce){.rf-cpill,.rf-chk,.rf-csend{transition:none}}
+
+</style>
+<style id="v21css">
+/* ===== v21 redesign shell: Now / Chats / Log (mock v3) ===== */
+.cap.sub75{opacity:.75}
+.ncard{background:var(--fill);border-radius:16px;padding:14px;margin-bottom:12px}
+.ncard.danger{background:var(--badBg);border:1px solid var(--bad)}
+.ncard.done{opacity:.8}
+.ncard .qwait,.ncard .rf-card{background:transparent;border:0;border-radius:0;padding:0;margin:0;box-shadow:none}
+.ncard .rf-card{border-top:0;position:static}
+.ncard .qttl{display:none}
+.ncard .qkind{display:none}
+.nhd{display:flex;align-items:center;gap:8px;font-size:12px;line-height:16px;font-weight:600;color:var(--text3);margin-bottom:6px}
+.nhd .nproj{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ntag{display:inline-flex;padding:2px 8px;border-radius:999px;font-size:12px;line-height:16px;font-weight:700;background:var(--accentSoft);color:var(--accentText)}
+.ntag.bad{background:var(--bad);color:var(--bg)}
+.ntitle{font-size:17px;line-height:22px;font-weight:600;margin:6px 0;overflow-wrap:anywhere}
+.nctx,.nplan{display:block;margin:8px 0;padding:10px 12px;border-radius:10px;background:var(--bg);border:1px solid var(--line);font-size:13px;line-height:18px;color:var(--text2);white-space:pre-wrap;overflow-wrap:anywhere}
+.nctx b,.nplan b{display:block;font-size:12px;line-height:16px;letter-spacing:.02em;color:var(--text3);margin-bottom:2px}
+.nbtn{display:flex;align-items:center;justify-content:center;width:100%;min-height:44px;margin-top:8px;border:0;border-radius:12px;font-size:15px;line-height:20px;font-weight:600;cursor:pointer;background:var(--line);color:var(--text)}
+.nbtn.primary{background:var(--accent);color:#fff}
+.nbtn.sec{background:var(--bg);color:var(--text);border:1px solid var(--line2)}
+.nbtn:disabled{opacity:.45;cursor:default}
+.ncard .qbtn2.sec,.ncard .qbtn2{min-height:44px}
+.ncard .qrow{flex-direction:column;align-items:stretch}
+.ncard .qrow .qbtn2{width:100%;flex:none}
+.nempty{display:flex;flex-direction:column;align-items:center;gap:6px;text-align:center;padding:40px 16px;color:var(--text3)}
+.nempty b{font-size:20px;line-height:26px;color:var(--ok)}
+.vchips{display:flex;gap:8px;overflow-x:auto;padding:4px 0 8px;scrollbar-width:none;-webkit-overflow-scrolling:touch}
+.vchips::-webkit-scrollbar{display:none}
+.vchip{flex:none;min-height:44px;padding:0 14px;border-radius:999px;border:1.5px solid var(--line);background:transparent;font-size:13px;line-height:18px;font-weight:600;color:var(--text2);display:inline-flex;align-items:center;gap:6px;cursor:pointer;white-space:nowrap}
+.vchip.on{border-color:var(--accent);background:var(--accentSoft);color:var(--accentText)}
+.vchip .vn{font-size:12px;line-height:16px;opacity:.8}
+.vsec{display:flex;justify-content:space-between;font-size:13px;line-height:18px;font-weight:600;color:var(--text3);margin:16px 0 6px}
+.vchat{background:var(--fill);border-radius:16px;padding:4px 8px 4px 4px;margin-bottom:8px;display:flex;align-items:center;gap:4px}
+.vmain{flex:1;min-width:0;min-height:56px;text-align:left;border:0;background:none;padding:8px 8px;display:flex;flex-direction:column;gap:2px;cursor:pointer}
+.vl1{display:flex;align-items:center;gap:8px;min-width:0}
+.vnm{flex:1;min-width:0;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.vst{flex:none;font-size:12px;line-height:16px;font-weight:600;color:var(--text3)}
+.vst.needs{color:var(--waitTx)}.vst.running{color:var(--accentText)}.vst.done{color:var(--ok)}
+.vdot{width:8px;height:8px;border-radius:50%;flex:none;background:var(--idleDot)}
+.vdot.needs{background:var(--waitDot)}.vdot.running{background:var(--runDot)}.vdot.done{background:var(--okdot)}
+.vlast{font-size:13px;line-height:18px;color:var(--text3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-left:16px}
+.vacts{display:flex;flex-direction:column;gap:0;flex:none}
+.vacts .btn.link{min-height:44px;font-size:13px;line-height:18px}
+.vacts .btn.link.sec{color:var(--text2)}
+.vassist{display:flex;align-items:center;gap:12px;width:100%;min-height:56px;text-align:left;border:0;border-radius:16px;padding:8px 16px;margin:4px 0 8px;background:var(--accentSoft);color:var(--text);cursor:pointer}
+.vassist .vtx{flex:1;min-width:0;display:flex;flex-direction:column}
+.vassist .vlast{margin-left:0}
+.vfoot{display:flex;justify-content:space-between;margin-top:12px}
+.vseg{display:flex;background:var(--fill);border-radius:10px;padding:2px;margin:4px 0 8px}
+.vseg button{flex:1;min-height:44px;border:0;border-radius:8px;background:none;font-size:13px;font-weight:600;color:var(--text2);cursor:pointer}
+.vseg button.on{background:var(--bg);color:var(--text);box-shadow:0 1px 3px rgba(0,0,0,.25)}
+.back2{min-height:44px}
 </style>
 </head>
 <body>
