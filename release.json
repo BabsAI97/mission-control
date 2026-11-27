@@ -1,7 +1,7 @@
 {
-  "v": 21,
+  "v": 22,
   "files": {
-    "app.js": "a925f925f7651ba3ece627d3e728fcec54f585d8447e4e8f267c2c76b32bccff",
+    "app.js": "b184ca04bb7c0f85f27e9eeb542e00e9b0ce5fe9364b72c2732ede70b4f3141a",
     "config.js": "6c15f7216e961e1ae126b957affaed3f36466a74c464d2df53fe206ee3a8423d",
     "guard.js": "3c8c7597ffed38ea077179d08b947d4550c4faf5484cab0e000989f5d710f537",
     "icons/icon-180.png": "b8432959d8adf3d86dcb455b610b0fcdf84c92e7d0ee76fefe0254f6adb058c1",

@@ -112,6 +112,7 @@ function friendlyError(action, out) {
   var t = str(out), bare = t.replace(/^tool error:\s*/i, "");
   if (action === "archive" && /^unpinned,\s*/i.test(bare)) return "The chat was unpinned, but archiving it failed (" + bare.replace(/^unpinned,\s*/i, "") + "). Try Archive again."; // REVIEW-v17-final M1: never say "pinned" after the Mac unpinned it
   if (action === "archive") { var ae = ARCHIVE_ERRORS[bare.toLowerCase()]; if (ae) return ae; } // L-round 11: one plain sentence per archive refusal code
+  if (action === "stop") { var pe = STOP_ERRORS[bare.toLowerCase()]; if (pe) return pe; } // W3a: one plain sentence per Stop refusal code
   if (action === "skill-verdict") { var se = SKILL_ERRORS[bare.toLowerCase()]; if (se) return se; }
   var plain = rfRefusal(action, t); // refocus: one plain sentence per refusal, never a raw code
   if (plain) return plain;
@@ -120,6 +121,22 @@ function friendlyError(action, out) {
   if (RF_ACTIONS.indexOf(action) >= 0 && t) return rfGeneric(bare);
   return action === "archive" && /pinned/i.test(t) && !/unpinned/i.test(t) ? "Not archived: session is pinned. Archive it again and confirm." : t;
 }
+/** W3a: plain sentences for the bridge's Stop refusal codes (stopWhy, refuse, doStop). Looked up lower-case, with any "tool error:" prefix removed. */
+var STOP_ERRORS = Object.assign(Object.create(null), {
+  "not running": "That chat is not running any more, so there is nothing to stop.",
+  "not owned": "That chat is no longer on your Mac. Pull to refresh.",
+  "host session": "That is the chat Mission Control runs in, so it cannot be stopped from here.",
+  "assistant session": "MC Assistant cannot be stopped from the phone.",
+  "needs pairing": "Pair this device first.",
+  "too many stops": "That is 10 stops in 10 minutes. Wait a few minutes, then try again.",
+  "stop in progress": "That chat is already being stopped.",
+  "answer in progress": "That chat is being answered right now. Try again in a moment.",
+  "stop check failed": "The Mac couldn\u2019t check that chat, so nothing was stopped. Try again.",
+  "not stopped": "The Mac asked Claude to stop, but it did not confirm. Pull to refresh and check.",
+  "still running": "The chat is still running. Try Stop again.",
+  "outside test fence": "That chat is outside the test fence, so it was not stopped.",
+  "timed out - may still complete": "The Mac hasn\u2019t answered yet. It may still stop \u2014 pull to refresh."
+});
 /** Plain sentences for the bridge's archive refusal codes (archiveWhy, refuse, verifyArchived, the watchdog). Looked up lower-case, with any "tool error:" prefix removed. */
 var ARCHIVE_ERRORS = Object.assign(Object.create(null), {
   "still working": "That chat is still working \u2014 archive it when it stops.",
@@ -657,8 +674,10 @@ function listTargets(machines, now, onlineMs) {
 /** The fields of each request the page creates (contract v0.3.5): send/archive are targeted at the computer that lists the session; send carries a 5 min ttl; Refresh = one targeted list per online computer, or one untargeted list when none is online. */
 function sendFields(sid, text, machines, about, target) { var f = { action: "send", sessionId: sid, text: text, target: target || pickTarget(sid, machines), ttlSec: SEND_TTL_SEC }; if (about) f.about = about; return f; }
 /** ttlSec for every action the app creates (contract v0.7.2: 60-300). */
-var REQ_TTL = { send: 300, peek: 60, list: 60, archive: 120, restore: 120, start: 300, "agent-save": 300, "agent-run": 300, "agent-toggle": 300, "agent-delete": 300, "research-now": 300, unpair: 120, "pair-start": 120, pair: 120, answer: 120, "reload-config": 60, "away-set": 120, "perm-answer": 120, "q-answer": 120, "keep-awake": 120, "tidy-refresh": 60, "tidy-apply": 300, "tidy-undo": 120, "skill-verdict": 120, "decision-answer": 120, "decision-snooze": 120, "decision-dismiss": 120, "decision-undo": 120, "decision-ask": 120, "decision-doit": 120, "job-approve": 120, "job-skip": 120, "job-restore": 120, "push-subscribe": 120, "push-unsubscribe": 120, "sweep-refresh": 60 };
+var REQ_TTL = { send: 300, peek: 60, list: 60, archive: 120, restore: 120, start: 300, "agent-save": 300, "agent-run": 300, "agent-toggle": 300, "agent-delete": 300, "research-now": 300, unpair: 120, "pair-start": 120, pair: 120, answer: 120, stop: 120, "reload-config": 60, "away-set": 120, "perm-answer": 120, "q-answer": 120, "keep-awake": 120, "tidy-refresh": 60, "tidy-apply": 300, "tidy-undo": 120, "skill-verdict": 120, "decision-answer": 120, "decision-snooze": 120, "decision-dismiss": 120, "decision-undo": 120, "decision-ask": 120, "decision-doit": 120, "job-approve": 120, "job-skip": 120, "job-restore": 120, "push-subscribe": 120, "push-unsubscribe": 120, "sweep-refresh": 60 };
 function archiveFields(sid, machines, confirm) { var f = { action: "archive", sessionId: sid, target: pickTarget(sid, machines) }; if (confirm === true) f.confirm = true; return f; } // v17: confirm = the user was told what archiving this pinned / scheduled-task chat costs and said yes
+/** W3a Stop: a signed request like archive, aimed at the computer that lists the chat. doneMsg is only for the toast (it is not part of the request). */
+function stopFields(sid, machines) { return { action: "stop", sessionId: sid, target: pickTarget(sid, machines), doneMsg: "Stopped. You can reply now (see Chats)." }; }
 function refreshFields(machines, now, onlineMs) {
   var ts = listTargets(machines, now, onlineMs);
   return ts.length ? ts.map(function (n) { return { action: "list", target: n }; }) : [{ action: "list" }];
@@ -1447,7 +1466,7 @@ function retryGate(r, mstat, machines, listed) {
 /** Labelled lines for an expanded Activity row and for "Copy details". */
 function activityDetails(r, sessionTitle) {
   if (r._foreign) return [["What", "Request details not verified"], ["Status", str(r.status)]].concat([["Created", r.createdAt], ["Done", r.doneAt]].map(function (p) { var t = Date.parse(p[1]); return isFinite(t) ? [p[0], dayMonth(t) + " " + hhmm(t)] : null; }).filter(Boolean));
-  var out = [["What", ({ send: "Reply", archive: "Archive", list: "Refresh", peek: "Peek", start: "Start session", restore: "Restore", "agent-save": "Save agent", "agent-run": "Run agent", "agent-toggle": "Agent on/off", "research-now": "Research", pair: "Pair device", unpair: "Remove device", "away-set": "Away mode", "perm-answer": "Permission answer", "q-answer": "Question answer", "keep-awake": "Keep awake", "tidy-refresh": "Tidy refresh", "tidy-apply": "Tidy", "tidy-undo": "Undo Tidy", "skill-verdict": "Skill suggestion", "sweep-refresh": "Check all chats" })[r.action] || str(r.action)], ["Status", str(r.status)]];
+  var out = [["What", ({ send: "Reply", stop: "Stop", archive: "Archive", list: "Refresh", peek: "Peek", start: "Start session", restore: "Restore", "agent-save": "Save agent", "agent-run": "Run agent", "agent-toggle": "Agent on/off", "research-now": "Research", pair: "Pair device", unpair: "Remove device", "away-set": "Away mode", "perm-answer": "Permission answer", "q-answer": "Question answer", "keep-awake": "Keep awake", "tidy-refresh": "Tidy refresh", "tidy-apply": "Tidy", "tidy-undo": "Undo Tidy", "skill-verdict": "Skill suggestion", "sweep-refresh": "Check all chats" })[r.action] || str(r.action)], ["Status", str(r.status)]];
   if (sessionTitle) out.push(["Session", sessionTitle]);
   if (r.action === "start" && r.title) out.push(["Title", str(r.title)]);
   if (r.action === "start" && FOLDER_ID_RE.test(str(r.folderId))) out.push(["Folder", str(r.folderId) === "home" ? "Home folder" : str(r.folderId) === "kb" ? "KnowledgeBase" : str(r.folderId).slice(3)]);
@@ -3023,7 +3042,7 @@ async function addPairMac(body, code) {
 }
 async function createRequest(f, opts) {
   if (!S.db) { toast("Not connected to the database."); return false; }
-  if ((f.action === "send" || f.action === "archive" || f.action === "restore" || f.action === "answer") && !SESSION_ID_RE.test(str(f.sessionId))) {
+  if ((f.action === "send" || f.action === "archive" || f.action === "restore" || f.action === "answer" || f.action === "stop") && !SESSION_ID_RE.test(str(f.sessionId))) {
     toast("That session id looks wrong, so nothing was sent."); return false;
   }
   if ((f.action === "agent-run" || f.action === "agent-toggle" || f.action === "agent-delete") && !SLUG_RE.test(str(f.agentId))) { toast("That agent id looks wrong, so nothing was sent."); return false; }
@@ -3034,6 +3053,7 @@ async function createRequest(f, opts) {
   if (f.action === "start" && f.folderId !== undefined && !FOLDER_ID_RE.test(str(f.folderId))) { toast("That folder looks wrong, so nothing was sent."); return false; }
   if (f.action === "start" && !fixedStart && (!str(f.title).trim() || !str(f.prompt).trim() || !f.target)) { toast("That start request is incomplete, so nothing was sent."); return false; }
   if (f.action === "answer" && (!str(f.text).trim() || str(f.text).length > 4000)) { toast("That answer is empty or too long, so nothing was sent."); return false; }
+  if (f.action === "stop" && !f.target) { toast("No computer lists that chat, so nothing was stopped."); return false; }
   if (f.action === "reload-config" && !f.target) { toast("No computer to reload, so nothing was sent."); return false; }
   if (RF_ACTIONS.indexOf(f.action) >= 0 && rfInvalid(f)) { toast("That request looks wrong, so nothing was sent."); return false; }
   if (R4_ACTIONS.indexOf(f.action) >= 0 && r4Invalid(f)) { toast("That request looks wrong, so nothing was sent."); return false; }
@@ -3729,8 +3749,8 @@ function renderQueue() { /* the queued message is shown by the one toast */ }
 /** After a send request exists: say what happened to it (queued behind the current step, or delivered). */
 function watchSend(rid) { S.sendWatch[rid] = Date.now(); }
 /* Honest status: every request (except reply sends, list, peek and pairing, which have their own) ends in a toast saying Done or Failed + why, with Retry. */
-var REQ_LABEL = { start: "Start session", archive: "Archive", restore: "Restore", "agent-run": "Agent run", "research-now": "Research run", "agent-save": "Agent change", "agent-toggle": "Agent change", "agent-delete": "Agent delete", unpair: "Device removal", "skill-verdict": "Skill suggestion" };
-var REQ_DONE = { start: "Session started on your Mac.", archive: "Archived.", restore: "Restored.", "agent-run": "Agent run started.", "research-now": "Research run started.", "agent-save": "Agent saved.", "agent-toggle": "Agent updated.", "agent-delete": "Agent deleted.", unpair: "Device removed.", "skill-verdict": "Saved." };
+var REQ_LABEL = { start: "Start session", stop: "Stop", archive: "Archive", restore: "Restore", "agent-run": "Agent run", "research-now": "Research run", "agent-save": "Agent change", "agent-toggle": "Agent change", "agent-delete": "Agent delete", unpair: "Device removal", "skill-verdict": "Skill suggestion" };
+var REQ_DONE = { start: "Session started on your Mac.", stop: "Stopped.", archive: "Archived.", restore: "Restored.", "agent-run": "Agent run started.", "research-now": "Research run started.", "agent-save": "Agent saved.", "agent-toggle": "Agent updated.", "agent-delete": "Agent deleted.", unpair: "Device removed.", "skill-verdict": "Saved." };
 function watchReq(id, f) { if (f && REQ_LABEL[f.action]) S.reqWatch[id] = { f: f, at: Date.now() }; }
 /** Where a request is now: "sending" (not picked up yet), "working", "done" or "error". */
 function reqState(id) {
@@ -4639,7 +4659,7 @@ function apDetail(d) {
 
 /* ---------- Saves and Activity tabs ---------- */
 var STATUS_LABEL = Object.assign(Object.create(null), { "new": "New", claimed: "Claimed", done: "Done", error: "Error", unverified: "Unverified", unknown: "Unknown \u2014 check" });
-var ACTION_LABEL = Object.assign(Object.create(null), { send: "Reply", archive: "Archive", list: "Refresh", peek: "Peek", start: "Start session", restore: "Restore", "agent-save": "Save agent", "agent-run": "Run agent", "agent-toggle": "Agent on/off", "research-now": "Research", pair: "Pair device", unpair: "Remove device", "away-set": "Away mode", "perm-answer": "Permission answer", "q-answer": "Question answer", "keep-awake": "Keep awake", "tidy-refresh": "Tidy refresh", "tidy-apply": "Tidy", "tidy-undo": "Undo Tidy", "skill-verdict": "Skill suggestion", "sweep-refresh": "Check all chats" });
+var ACTION_LABEL = Object.assign(Object.create(null), { send: "Reply", stop: "Stop", archive: "Archive", list: "Refresh", peek: "Peek", start: "Start session", restore: "Restore", "agent-save": "Save agent", "agent-run": "Run agent", "agent-toggle": "Agent on/off", "research-now": "Research", pair: "Pair device", unpair: "Remove device", "away-set": "Away mode", "perm-answer": "Permission answer", "q-answer": "Question answer", "keep-awake": "Keep awake", "tidy-refresh": "Tidy refresh", "tidy-apply": "Tidy", "tidy-undo": "Undo Tidy", "skill-verdict": "Skill suggestion", "sweep-refresh": "Check all chats" });
 function focusables(root) { return Array.prototype.slice.call(root.querySelectorAll('a[href],button:not([disabled]),input:not([disabled]),select,textarea,[tabindex="0"]')); }
 /** Keep Tab inside a sheet: wraps last -> first and first (or the title) -> last. */
 function trapTab(e, root) {
@@ -6834,6 +6854,7 @@ function v21NowCard(it, gate) {
     card.appendChild(v21Head(project, c.done ? "" : kind, age, bad, c.title));
     if (!c.done) { var cb = v21CtxBox(ctx); if (cb) card.appendChild(cb); }
     card.appendChild(quickCardNode(c, gate));
+    var stb = sess && !c.done ? v21StopBtn(sess, "now-stop-", "nbtn sec") : null; if (stb) card.appendChild(stb); // W3a: only while the chat is running
     return card;
   }
   if (it.k === "dec") {
@@ -6878,6 +6899,32 @@ function v21NowNode(model) {
 function v21Chip(label, n, on, key, fn) {
   return h("button", { "class": "vchip" + (on ? " on" : ""), type: "button", "data-k": key, "aria-pressed": String(on), onclick: fn }, label, n !== null && n !== undefined ? h("span", { "class": "vn", text: String(n) }) : null);
 }
+/* W3a Stop: why a chat cannot be stopped from the phone ("" = it can). Only a running chat on a verified, paired, online computer; never MC Assistant. */
+function stopBlock(s) {
+  if (!s || s.unverified) return "Unverified";
+  if (!s.online) return (s.machine || "Computer") + " offline";
+  if (S.model && S.model.mstat && S.model.mstat[s.machine] && S.model.mstat[s.machine].youPaired === false) return "Pair this device first";
+  if (S.assistInfo && S.assistInfo.id === s.id) return "Assistant";
+  return s.running ? "" : "Not running";
+}
+/** One confirm, then one signed `stop` request. Nothing is sent before the yes. */
+function askStop(s) {
+  var why = stopBlock(s);
+  if (why) { toast("Not stopped: \u201c" + (s && s.title) + "\u201d (" + why + ")."); return; }
+  S.ask = { title: "Stop \u201c" + s.title + "\u201d now?", body: "Whatever it\u2019s doing stops at once. You can reply to it after.", okLabel: "Stop", cancelLabel: "Not now", sheet: true, top: true, danger: true, keyExtra: "stop|" + s.id, ok: function () { doStop(s.id); } };
+  renderDialog();
+}
+async function doStop(id) {
+  var s = S.byId && S.byId[id], why = stopBlock(s);
+  if (why) { toast("Not stopped (" + why + ")."); return; }
+  var res = await once("stop:" + id, function () { return createRequest(stopFields(id, S.machines)); });
+  if (res === undefined) return; // a duplicate tap: the first call finishes the job
+  if (res) { toast("Stop requested. See Log.", { open: "activity" }); render(true); }
+  else toast(S.reqUnknown ? "Stop: " + S.reqErr + "." : "Not stopped: " + (S.reqErr || "the request could not be sent") + ". Try again.");
+}
+function v21StopBtn(s, key, cls) {
+  return stopBlock(s) ? null : h("button", { "class": cls, type: "button", "data-k": key + s.id, "aria-label": "Stop " + s.title, onclick: function () { askStop(s); }, text: "Stop" });
+}
 function v21ChatRow(s, st) {
   var v = S.peek[s.id], live = liveLine(s, v, S.now), m = sessionMeta(s, S.now, v), label = st === "needs" ? "Needs you" : st === "running" ? "Running" : st === "done" ? "Done" : "Idle";
   var last = live || (st === "needs" ? askText(s) : v && v.status === "ok" && v.items && v.items.length ? str(v.items[v.items.length - 1].text).replace(/\s+/g, " ").slice(0, 120) : m.sub);
@@ -6887,6 +6934,7 @@ function v21ChatRow(s, st) {
     h("span", { "class": "vlast", text: last })));
   row.appendChild(h("div", { "class": "vacts" },
     h("button", { "class": "btn link", type: "button", "data-k": "v21-open-" + s.id, onclick: function () { openFocus(s.id); }, text: st === "needs" ? "Reply" : "Open" }),
+    st === "running" ? v21StopBtn(s, "v21-stop-", "btn link sec") : null,
     h("button", { "class": "btn link sec", type: "button", "data-k": "v21-arch-" + s.id, onclick: function () { askArchiveMany(s.title, [s]); }, text: "Archive" })));
   return row;
 }
